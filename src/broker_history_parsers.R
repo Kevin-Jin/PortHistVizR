@@ -104,7 +104,7 @@ load.schwab.transactions <- function(export.file) {
       +1, +1))
   cash.actions <- c(
     "Journal", "MoneyLink Transfer",
-    "Bank Interest", "Cash Dividend", "Pr Yr Cash Div")
+    "Bank Interest", "Cash Dividend", "Pr Yr Cash Div", "Service Fee")
   
   tx <- read.csv(export.file, skip=1, stringsAsFactors=FALSE, check.names=FALSE)
   stopifnot(tail(tx$Date, 1) == "Transactions Total")
