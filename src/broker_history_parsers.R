@@ -38,10 +38,12 @@ adjust.for.schwab.corporate.actions <- function(tx, commission=0.65) {
   tx <- tx[tx$Action != "Reverse Split", ]
   
   # Expired options are worthless.
-  stopifnot(all(is.na(tx[tx$Action == "Expired", c("Price", "Amount")])))
-  stopifnot(all(tx[tx$Action == "Expired", "Fees & Comm"] == 0))
+  is.expired <- tx$Action %in% c("Expired", "Assigned")
+  stopifnot(all(is.na(tx[is.expired, c("Price", "Amount")])))
+  stopifnot(all(tx[is.expired, "Fees & Comm"] == 0))
   stopifnot(all(tx[tx$Action == "Expired", "Quantity"] < 0))
-  tx[tx$Action == "Expired", c("Price", "Fees & Comm", "Amount")] <- 0
+  stopifnot(all(tx[tx$Action == "Assigned", "Quantity"] > 0))
+  tx[is.expired, c("Price", "Fees & Comm", "Amount")] <- 0
   
   # 0.65 options commission will be added to tx$Price by adjust.options.prices,
   #  so remove it from the fees to avoid double counting.
@@ -97,11 +99,11 @@ load.schwab.transactions <- function(export.file) {
     Action=c(
       "Buy", "Buy to Open", "Buy to Close",
       "Sell", "Sell to Open", "Sell to Close", "Sell Short",
-      "Reverse Split", "Expired"),
+      "Reverse Split", "Expired", "Assigned"),
     Sign=c(
       +1, +1, +1,
       -1, -1, -1, -1,
-      +1, +1))
+      +1, +1, +1))
   cash.actions <- c(
     "Journal", "MoneyLink Transfer",
     "Bank Interest", "Cash Dividend", "Pr Yr Cash Div", "Service Fee")
@@ -274,10 +276,12 @@ load.alphavantage.prices <- function(directory, fallback) {
         for.symbol$low[past.indices] / for.symbol$split_coefficient[corp.action])
     }
     
-    for.symbol <- for.symbol[, c("timestamp", "high", "low", "close")]
-    colnames(for.symbol) <- c("Date", "High", "Low", "Close")
-    price.overrides <- rbind(
-      price.overrides, cbind(Symbol=symbol, for.symbol, stringsAsFactors=FALSE))
+    if (nrow(for.symbol) > 0) {
+      for.symbol <- for.symbol[, c("timestamp", "high", "low", "close")]
+      colnames(for.symbol) <- c("Date", "High", "Low", "Close")
+      price.overrides <- rbind(
+        price.overrides, cbind(Symbol=symbol, for.symbol, stringsAsFactors=FALSE))
+    }
   }
   
   create.price.provider.with.overrides(price.overrides, fallback)
@@ -296,9 +300,11 @@ load.simple.prices <- function(override.file, fallback) {
 }
 
 refresh.alphavantage.prices <- function(
-  transaction.file.loaders, alpha.vantage.key, day.lag=0, exch.tzone="America/New_York",
-  exch.close=c(16, 0), output.folder=file.path("input", "alphavantage"), requests.per.minute=5,
-  requests.per.day=500) {
+    transaction.file.loaders, alpha.vantage.key, day.lag=0, exch.tzone="America/New_York",
+    # US exchanges close at 16:00 America/New_York, but allow 30 minutes for Alpha Vantage to
+    #  disseminate the official closing auction prices.
+    exch.close=c(16, 30), output.folder=file.path("input", "alphavantage"), requests.per.minute=5,
+    requests.per.day=500) {
   tx <- do.call(rbind, lapply(
     names(transaction.file.loaders),
     function(file.name) transaction.file.loaders[[file.name]](file.name)))
@@ -331,23 +337,26 @@ refresh.alphavantage.prices <- function(
       now <- as.POSIXct(now)
       
       existing.price.dates <- as.Date(read.csv(file.name, stringsAsFactors=FALSE)$timestamp)
-      px.last.date <- max(existing.price.dates)
-      px.first.date <- min(existing.price.dates)
-      
-      px.next.date <- px.last.date + 1
-      while (!isBizday(as.timeDate(px.next.date), holidayNYSE())) {
-        px.next.date <- px.next.date + 1
-      }
-      px.next.time <- as.POSIXct(format(px.next.date))
-      attr(px.next.time, "tzone") <- exch.tzone
-      px.next.time <- as.POSIXlt(px.next.time)
-      px.next.time$hour <- exch.close[1]
-      px.next.time$min <- exch.close[2]
-      px.next.time <- as.POSIXct(px.next.time)
-      
-      if ((px.next.time > now || px.last.date >= tx.last.date) && px.first.date <= tx.first.date) {
-        print(paste(Sys.time(), "-", symbol, "- prices are already up to date"))
-        next
+      if (length(existing.price.dates) > 0) {
+        px.last.date <- max(existing.price.dates)
+        px.first.date <- min(existing.price.dates)
+        
+        px.next.date <- px.last.date + 1
+        while (!isBizday(as.timeDate(px.next.date), holidayNYSE())) {
+          px.next.date <- px.next.date + 1
+        }
+        px.next.time <- as.POSIXct(format(px.next.date))
+        attr(px.next.time, "tzone") <- exch.tzone
+        px.next.time <- as.POSIXlt(px.next.time)
+        px.next.time$hour <- exch.close[1]
+        px.next.time$min <- exch.close[2]
+        px.next.time <- as.POSIXct(px.next.time)
+        
+        if ((px.next.time > now || px.last.date >= tx.last.date)
+            && px.first.date <= tx.first.date) {
+          print(paste(Sys.time(), "-", symbol, "- prices are already up to date"))
+          next
+        }
       }
     }
     
