@@ -85,7 +85,9 @@ normalize.schwab.option.symbol <- function(tx) {
 }
 
 append.contra.tx <- function(tx) {
-  contra.tx <- tx[tx$Symbol != "$", ]
+  # Options expirations are cashless transactions. Exclude those to avoid division by 0 in a day's
+  #  aggregate cash change when options expirations are the only transactions for the day.
+  contra.tx <- tx[tx$Symbol != "$" & tx$Amount != 0, ]
   contra.tx$Symbol <- "$"
   contra.tx$Price <- 1
   contra.tx$Quantity <- contra.tx$Amount
@@ -141,22 +143,75 @@ load.schwab.transactions <- function(export.file) {
   tx
 }
 
+normalize.fidelity.option.symbol <- function(tx.part) {
+  option.matches <- regexpr(
+    "^-(\\w+)(\\d{6})([CP])(\\d+(?:\\.\\d+)?)$", tx.part$Symbol, perl=TRUE)
+  matched.symbols <- tx.part$Symbol[option.matches != -1]
+  capture.start <- attr(option.matches, "capture.start")[option.matches != -1, ]
+  capture.stop <- capture.start + attr(option.matches, "capture.length")[option.matches != -1, ] - 1
+
+  root.symbol <- substr(matched.symbols, capture.start[, 1], capture.stop[, 1])
+  expiration.date <- as.Date(
+    substr(matched.symbols, capture.start[, 2], capture.stop[, 2]), "%y%m%d")
+  claim.type <- substr(matched.symbols, capture.start[, 3], capture.stop[, 3])
+  strike <- as.numeric(substr(matched.symbols, capture.start[, 4], capture.stop[, 4]))
+  
+  stopifnot(all(nchar(root.symbol) <= 6 & !is.na(expiration.date) & strike < 100000 & as.integer(
+    strike * 1000) == strike * 1000))
+  occ.code <- sprintf("%-6s%s%s%08d", root.symbol, as.character(
+    expiration.date, "%y%m%d"), claim.type, as.integer(strike * 1000))
+  
+  tx.part$Symbol[option.matches != -1] <- occ.code
+  tx.part
+}
+
+normalize.fidelity.option.expirations <- function(tx.part) {
+  expired.tx <- grepl("^EXPIRED", tx.part$Action)
+  stopifnot(all(!is.na(tx.part$Quantity[expired.tx])))
+  stopifnot(all(is.na(tx.part[expired.tx, c("Price", "Amount")])))
+  tx.part[expired.tx, c("Price", "Amount")] <- 0
+  
+  as.of.matches <- regexpr(
+    "as of (\\d{2}/\\d{2}/\\d{4})", tx.part$Action[expired.tx], perl=TRUE)
+  matched.actions <- tx.part$Action[expired.tx][as.of.matches != -1]
+  capture.start <- attr(as.of.matches, "capture.start")[as.of.matches != -1, , drop=FALSE]
+  capture.stop <- capture.start + attr(
+    as.of.matches, "capture.length")[as.of.matches != -1, , drop=FALSE] - 1
+  as.of.dates <- substr(matched.actions, capture.start[, 1], capture.stop[, 1])
+  tx.part$Date[expired.tx][as.of.matches != -1] <- as.Date(as.of.dates, "%m/%d/%Y")
+  
+  tx.part
+}
+
 load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
   # Fidelity limits the date range in each file to one quarter, so we need to join the older files
   #  to the most recent files to get the full history.
   tx <- NULL
   for (download.file in sort(list.files(directory))) {
+    # Fidelity inconsistently prefixes CSVs with either "\n\n\nBrokerage\n\n" or "\n\n\n".
+    con <- file(file.path(directory, download.file), "r")
+    skip <- 0
+    tryCatch({
+      while (length(line <- readLines(con, n=1)) != 0 && !grepl(",", line, fixed=TRUE)) {
+        stopifnot(line %in% c("", "Brokerage"))
+        skip <- skip + 1
+      }
+    }, finally={
+      close(con)
+    })
+    
     tx.part <- read.csv(
-      file.path(directory, download.file), skip=5, stringsAsFactors=FALSE, check.names=FALSE,
+      file.path(directory, download.file), skip=skip, stringsAsFactors=FALSE, check.names=FALSE,
       strip.white=TRUE)
     tx.part <- tx.part[
-      !is.na(tx.part[, "Amount ($)"]),
+      !is.na(tx.part[, "Amount ($)"]) | !is.na(tx.part[, "Quantity"]),
       c("Run Date", "Action", "Symbol", "Quantity", "Price ($)", "Commission ($)", "Fees ($)",
         "Amount ($)")]
     names(tx.part) <- c(
       "Date", "Action", "Symbol", "Quantity", "Price", "Commission", "Fees", "Amount")
     
     tx.part$Date <- as.Date(tx.part$Date, "%m/%d/%Y")
+    tx.part <- normalize.fidelity.option.symbol(tx.part)
     tx.part$Fees[is.na(tx.part$Fees)] <- 0
     tx.part$Commission[is.na(tx.part$Commission)] <- 0
     tx.part$`Fees & Comm` <- tx.part$Fees + tx.part$Commission
@@ -165,18 +220,21 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
     #stopifnot(diff(tx.part$Date) <= 0)
     
     stopifnot(all(tx.part$Symbol != "$"))
+    tx.part <- normalize.fidelity.option.expirations(tx.part)
     stopifnot(all(is.na(tx.part$Price) == is.na(tx.part$Quantity)))
     stopifnot(all(grepl(
-      "^(DIVIDEND RECEIVED|ROTH CONVERSION|ROLLOVER)", tx.part$Action[is.na(tx.part$Quantity)])))
+      "^(DIVIDEND RECEIVED|ROTH CONVERSION|ROLLOVER|JOURNALED JNL VS A/C TYPES)",
+      tx.part$Action[is.na(tx.part$Quantity)])))
     stopifnot(all(grepl(
       "^(YOU BOUGHT|REINVESTMENT)",
       tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity > 0])))
     stopifnot(all(grepl(
-      "^(YOU SOLD)", tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity < 0])))
+      "^(YOU SOLD|EXPIRED)", tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity < 0])))
     stopifnot(all(tx.part$Symbol[startsWith(tx.part$Action, "REINVESTMENT")] == cash.symbol))
     tx.part <- normalize.cash.transactions(tx.part)
     stopifnot(all(startsWith(tx.part$Action[tx.part$Symbol == cash.symbol], "REINVESTMENT")))
     tx.part <- tx.part[tx.part$Symbol != cash.symbol, ]
+    tx.part <- adjust.options.prices(tx.part)
     tx.part <- append.contra.tx(tx.part)
     tx.part <- tx.part[, c("Date", "Symbol", "Quantity", "Price")]
     
