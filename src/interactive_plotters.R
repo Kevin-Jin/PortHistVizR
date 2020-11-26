@@ -116,6 +116,9 @@ get.interactive.size.vs.price.plot <- function(
   #  errors on base 10 fractions, e.g. ceiling(17.35 * 100) / 100 == 17.36 while
   #  ceiling(round(17.35 * 100, 4)) / 100 == 17.35 and floor(17.4 * 100) / 100 == 17.39 while
   #  floor(round(17.4 * 100, 4)) / 100 == 17.4.
+  # Using the reciprocal of the tick.size results in less rounding error since 100 is exactly
+  #  representable in binary floating point but 0.01 is not.
+  # There is no counterpart to trunc for rounding away from 0, so roll our own implementation.
   size.vs.price$Price <- ifelse(
     size.vs.price$Quantity < 0,
     floor(round(size.vs.price$Price * (1 / tick.size), 4)) / (1 / tick.size),
@@ -131,15 +134,15 @@ get.interactive.size.vs.price.plot <- function(
     data.frame(
       Cost=sum(for.price$Cost),
       Cum.Cost=tail(for.price$Cum.Cost[order(for.price$Pct.Drawdown)], 1),
-      Quantity=sum(for.price$Quantity)))
+      Quantity=round(sum(for.price$Quantity), QTY_FRAC_DIGITS)))
   size.vs.price$Pct.Drawdown <- 100 * (1 - size.vs.price$Price / peak.price)
   size.vs.price <- size.vs.price[order(size.vs.price$Pct.Drawdown), ]
   
   data <- data.frame(
     x=size.vs.price$Pct.Drawdown, y=size.vs.price$Cum.Cost, Price=size.vs.price$Price,
-    Quantity=size.vs.price$Quantity)
+    Quantity=round(size.vs.price$Quantity, QTY_FRAC_DIGITS))
   data <- rbind(data.frame(x=-1, y=0, Price=peak.price, Quantity=0), data)
-  data <- cbind(data, CumQuantity=cumsum(data$Quantity))
+  data <- cbind(data, CumQuantity=round(cumsum(data$Quantity), QTY_FRAC_DIGITS))
   data <- cbind(data, Prev=c(0, head(data$y, -1)), PrevCumQuantity=c(0, head(data$CumQuantity, -1)))
   
   hc <- highchart() %>%
@@ -199,7 +202,7 @@ get.interactive.size.vs.time.plot <- function(
     costs <- calc.portfolio.size.vs.time(tx, symbol, price.provider)
   }
   costs$Gain <- costs$Value - costs$Cost
-  costs$Cum.Quantity <- cumsum(costs$Quantity)
+  costs$Cum.Quantity <- round(cumsum(costs$Quantity), QTY_FRAC_DIGITS)
   
   hc <- highchart() %>%
     hc_chart(zoomType="xy") %>%
@@ -207,15 +210,15 @@ get.interactive.size.vs.time.plot <- function(
     hc_tooltip(shared=TRUE, valueDecimals=2, borderColor=colors$blue) %>%
     hc_xAxis(title=list(text="Date"), type="datetime", gridLineWidth=1) %>%
     hc_yAxis_multiples(
-      list(title=list(text="Position Size")), list(title=list(text="Percent"), opposite=TRUE))
+      list(title=list(text="Position Size")), list(title=list(text="Gain"), opposite=TRUE))
   
   hc <- hc %>%
     hc_add_series(
-      name="Percentage gain",
-      id="ROC",
+      name="Gain",
+      id="PNL",
       data=data.frame(
         x=datetime_to_timestamp(costs$Date),
-        y=ifelse(costs$Cost <= 0, NA, 100 * (costs$Value / costs$Cost - 1))),
+        y=costs$Value - costs$Cost),
       marker=list(symbol="diamond", radius=2),
       color=colors$yellow,
       type="area",
@@ -227,7 +230,7 @@ get.interactive.size.vs.time.plot <- function(
           list(1, "#F4F4F4"))),
       yAxis=1,
       tooltip=list(pointFormat=paste(
-        "<span style=\"color:{point.color}\">\u25CF</span> {series.name}: <b>{point.y:0.2f}%</b>",
+        "<span style=\"color:{point.color}\">\u25CF</span> {series.name} ($): <b>{point.y:0.2f}</b>",
         "",
         sep="<br/>")))
   
@@ -244,7 +247,6 @@ get.interactive.size.vs.time.plot <- function(
       marker=list(symbol="diamond", radius=2),
       color=colors$red,
       tooltip=list(pointFormat=paste(
-        "<span style=\"color:{series.options.custom}\">\u25CF</span> Gain ($): <b>{point.Gain:0.2f}</b>",
         "<span style=\"color:{series.options.custom}\">\u25CF</span> Quantity (shares): <b>{point.Quantity}</b>",
         "<span style=\"color:{point.color}\">\u25CF</span> {series.name} ($): <b>{point.y}</b>",
         "<span style=\"color:{point.color}\">\u25CF</span> Unit cost ($): <b>{point.UnitCost:0.2f}</b>",

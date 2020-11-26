@@ -18,7 +18,9 @@ coalesce.tx.by.date.symbol.price <- function(tx) {
   reduce.on.factor(tx, "Date", function(tx.for.date) {
     reduce.on.factor(tx.for.date, "Symbol", function(tx.for.symbol) {
       tx.by.price <- lapply(split(tx.for.symbol$Quantity, tx.for.symbol$Price), sum)
-      data.frame(Quantity=unname(unlist(tx.by.price)), Price=as.numeric(names(tx.by.price)))
+      data.frame(
+        Quantity=round(unname(unlist(tx.by.price)), QTY_FRAC_DIGITS),
+        Price=as.numeric(names(tx.by.price)))
     })
   })
 }
@@ -47,7 +49,7 @@ filter.tx <- function(tx, symbols, from.date, to.date) {
 aggregate.purchases.and.sales <- function(tx, price.provider=recent.transaction.price.provider) {
   avg.price <- function(tx.for.factor) {
     cost <- sum(tx.for.factor$Cost)
-    quantity <- sum(tx.for.factor$Quantity)
+    quantity <- round(sum(tx.for.factor$Quantity), QTY_FRAC_DIGITS)
     peak.price <- sum(tx.for.factor$Price) / sum(1 - tx.for.factor$Pct.Drawdown / 100)
     unit.cost <- cost / quantity
     data.frame(
@@ -196,7 +198,7 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
       Average.Price=price.provider$price(symbol, date, for.date),
       Low.Price=price.provider$low.price(symbol, date, for.date),
       High.Price=price.provider$high.price(symbol, date, for.date),
-      Quantity=sum(for.date$Quantity))
+      Quantity=round(sum(for.date$Quantity), QTY_FRAC_DIGITS))
   })
   available.price.dates <- price.provider$available.dates(symbol)
   available.price.dates <- available.price.dates[
@@ -249,7 +251,9 @@ identify.tx.nearby <- function(tx, symbol, price.provider=recent.transaction.pri
   current.price <- get.current.price(tx, symbol, price.provider)
   tx.for.symbol <- tx[tx$Symbol == symbol, c("Price", "Quantity", "Pct.Drawdown")]
   tx.for.symbol <- reduce.on.factor(tx.for.symbol, "Price", function(for.price)
-    data.frame(Quantity=sum(for.price$Quantity), Pct.Drawdown=unique(for.price$Pct.Drawdown)))
+    data.frame(
+      Quantity=round(sum(for.price$Quantity), QTY_FRAC_DIGITS),
+      Pct.Drawdown=unique(for.price$Pct.Drawdown)))
   tx.buys <- tx.for.symbol[tx.for.symbol$Quantity > 0 & tx.for.symbol$Price >= current.price, ]
   tx.buys <- tail(tx.buys[order(tx.buys$Price, decreasing=TRUE), ], 5)
   tx.sells <- tx.for.symbol[tx.for.symbol$Quantity < 0 & tx.for.symbol$Price <= current.price, ]

@@ -1,3 +1,12 @@
+# Mutual funds allow 3 digits of precision after the decimal place for quantities.
+# Schwab fractional shares allow for 4 digits of precision after the decimal place.
+# Robinhood fractional shares allow for 6 digits of precision after the decimal place.
+# Make sure to round any quantity sums to avoid problems when checking whether a quantity is zero,
+#  negative, or positive and to avoid unnecessary digits when formatting the number as a string.
+# Floating point error is well below 1e-6, so this level of precision should not introduce numerical
+#  noise for brokers with lower precision quantities.
+QTY_FRAC_DIGITS <- 6
+
 is.options.symbol <- function(symbol) {
   regexpr("^[\\w ]{6}\\d{6}[CP]\\d{8}$", symbol, perl=TRUE) != -1
 }
@@ -371,7 +380,7 @@ refresh.alphavantage.prices <- function(
     Cost=sum(tx.for.symbol$Cost),
     First.Date=min(tx.for.symbol$Date),
     Last.Date=max(tx.for.symbol$Date),
-    Quantity=sum(tx.for.symbol$Quantity)))
+    Quantity=round(sum(tx.for.symbol$Quantity), QTY_FRAC_DIGITS)))
   ordered.symbols <- tx.by.symbol$Symbol[order(tx.by.symbol$Cost, decreasing=TRUE)]
   ordered.symbols <- ordered.symbols[!is.options.symbol(ordered.symbols) & ordered.symbols != "$"]
   
