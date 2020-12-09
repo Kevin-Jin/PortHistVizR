@@ -46,7 +46,8 @@ filter.tx <- function(tx, symbols, from.date, to.date) {
   tx
 }
 
-aggregate.purchases.and.sales <- function(tx, price.provider=recent.transaction.price.provider) {
+aggregate.purchases.and.sales <- function(
+    tx, price.provider=recent.transaction.price.provider, date=Sys.Date()) {
   avg.price <- function(tx.for.factor) {
     cost <- sum(tx.for.factor$Cost)
     quantity <- round(sum(tx.for.factor$Quantity), QTY_FRAC_DIGITS)
@@ -61,13 +62,14 @@ aggregate.purchases.and.sales <- function(tx, price.provider=recent.transaction.
       Full.Rebound.Gain=quantity * peak.price - cost)
   }
   
+  tx <- tx[tx$Date <= date, ]
   agg.by.symbol <- reduce.on.factor(tx, "Symbol", avg.price)
   agg.by.symbol <- agg.by.symbol[order(agg.by.symbol$Cost), ]
   row.names(agg.by.symbol) <- c()
   
   agg.by.symbol$Unit.Value <- unlist(lapply(
     agg.by.symbol$Symbol,
-    function(symbol) get.current.price(tx, symbol, price.provider)))
+    function(symbol) get.current.price(tx, symbol, price.provider, date)))
   agg.by.symbol$Value <- agg.by.symbol$Quantity * agg.by.symbol$Unit.Value
   agg.by.symbol$Value.Pct.Drawdown <- (
     1 - agg.by.symbol$Unit.Value / agg.by.symbol$Peak.Price) * 100
@@ -97,6 +99,16 @@ aggregate.purchases.and.sales <- function(tx, price.provider=recent.transaction.
   agg.all <- rbind(agg.all, aggregate.on.portfolio("Portfolio", agg.all))
   agg.all$Gain <- agg.all$Value - agg.all$Cost
   agg.all
+}
+
+aggregate.purchases.and.sales.with.day.over.day.gain <- function(
+    tx, price.provider=recent.transaction.price.provider) {
+  agg.all <- aggregate.purchases.and.sales(tx, price.provider)
+  agg.all.yday <- aggregate.purchases.and.sales(tx, price.provider, max(tx$Date) - 1)
+  
+  yday.idx <- match(agg.all$Symbol, agg.all.yday$Symbol)
+  yday.gain <- ifelse(is.na(yday.idx), 0, agg.all.yday$Gain[yday.idx])
+  cbind(agg.all, Day.Over.Day.Gain=agg.all$Gain - yday.gain)
 }
 
 solve.entry.price.and.quantity <- function(tx, target.net.pct.drawdown, target.portfolio.net.cost) {

@@ -218,7 +218,8 @@ get.interactive.size.vs.time.plot <- function(
       id="PNL",
       data=data.frame(
         x=datetime_to_timestamp(costs$Date),
-        y=costs$Value - costs$Cost),
+        y=costs$Value - costs$Cost,
+        DayOverDayGain=if (nrow(costs) == 0) c() else c(0, diff(costs$Value - costs$Cost))),
       marker=list(symbol="diamond", radius=2),
       color=colors$yellow,
       type="area",
@@ -231,6 +232,7 @@ get.interactive.size.vs.time.plot <- function(
       yAxis=1,
       tooltip=list(pointFormat=paste(
         "<span style=\"color:{point.color}\">\u25CF</span> {series.name} ($): <b>{point.y:0.2f}</b>",
+        "<span style=\"color:{point.color}\">\u25CF</span> Day over day gain ($): <b>{point.DayOverDayGain:0.2f}</b>",
         "",
         sep="<br/>")))
   
@@ -372,7 +374,7 @@ plot.interactive <- function(
   portfolio.plot$elementId <- "portfolio-plot"
   symbol.plots <- c(symbol.plots, list(portfolio.plot))
   
-  formatted.tx <- aggregate.purchases.and.sales(tx, price.provider)
+  formatted.tx <- aggregate.purchases.and.sales.with.day.over.day.gain(tx, price.provider)
   formatted.tx$Symbol <- gsub(" ", "&nbsp;", formatted.tx$Symbol)
   formatted.tx$Cost.Pct.Drawdown <- formatted.tx$Cost.Pct.Drawdown / 100
   formatted.tx$Value.Pct.Drawdown <- formatted.tx$Value.Pct.Drawdown / 100
@@ -383,7 +385,9 @@ plot.interactive <- function(
     rownames=FALSE,
     escape=FALSE)
   portfolio.summary <- portfolio.summary %>% formatCurrency(
-    c("Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Unit.Value", "Value", "Gain"),
+    c(
+      "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Unit.Value", "Value", "Gain",
+      "Day.Over.Day.Gain"),
     digits=4)
   portfolio.summary <- portfolio.summary %>% formatPercentage(
     c("Cost.Pct.Drawdown", "Value.Pct.Drawdown"), 2)
