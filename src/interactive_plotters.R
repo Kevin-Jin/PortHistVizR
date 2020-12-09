@@ -193,7 +193,12 @@ get.interactive.size.vs.price.plot <- function(
 }
 
 get.interactive.size.vs.time.plot <- function(
-    tx, symbol, price.provider=recent.transaction.price.provider, name=symbol, arearange=FALSE) {
+    tx, symbol, price.provider=recent.transaction.price.provider, name=symbol, arearange=FALSE,
+    hide.initially=TRUE) {
+  # Size vs. time plots are the densest charts since they plot an observation per business day
+  #  rather than an observation per transaction.
+  # All series are hidden initially to cut down on browser rendering time on page load.
+  # Users are expected to manually toggle the size vs. time plots they're interested in.
   if (length(symbol) == 1) {
     costs <- calc.size.vs.time(tx, symbol, price.provider)
   } else if (length(symbol) == 0) {
@@ -205,12 +210,39 @@ get.interactive.size.vs.time.plot <- function(
   costs$Cum.Quantity <- round(cumsum(costs$Quantity), QTY_FRAC_DIGITS)
   
   hc <- highchart() %>%
-    hc_chart(zoomType="xy") %>%
+    hc_plotOptions(
+      series=list(
+        events=list(
+          legendItemClick=JS("
+            function() {
+              if (this.name == 'Show all' || this.name == 'Hide all') {
+                this.chart.series.forEach(
+                  series => this.chart.showHideFlag ? series.hide() : series.show());
+                this.chart.showHideFlag = !this.chart.showHideFlag;
+                this.chart.series[this.index].update({name: this.chart.showHideFlag ? 'Hide all' : 'Show all'})
+              }
+            }")
+        )
+      )
+    ) %>%
+    hc_chart(
+      animation=FALSE,
+      zoomType="xy",
+      events=list(load=JS("function() { this.showHideFlag = false; }"))
+    ) %>%
     hc_title(text=paste(name, "Size vs. Time")) %>%
     hc_tooltip(shared=TRUE, valueDecimals=2, borderColor=colors$blue) %>%
     hc_xAxis(title=list(text="Date"), type="datetime", gridLineWidth=1) %>%
     hc_yAxis_multiples(
       list(title=list(text="Position Size")), list(title=list(text="Gain"), opposite=TRUE))
+  
+  hc <- hc %>%
+    hc_add_series(
+      name="Show all",
+      visible=FALSE,
+      marker=list(enabled=FALSE),
+      lineWidth=0
+    )
   
   hc <- hc %>%
     hc_add_series(
@@ -234,7 +266,8 @@ get.interactive.size.vs.time.plot <- function(
         "<span style=\"color:{point.color}\">\u25CF</span> {series.name} ($): <b>{point.y:0.2f}</b>",
         "<span style=\"color:{point.color}\">\u25CF</span> Day over day gain ($): <b>{point.DayOverDayGain:0.2f}</b>",
         "",
-        sep="<br/>")))
+        sep="<br/>")),
+      visible=!hide.initially)
   
   hc <- hc %>%
     hc_add_series(
@@ -252,7 +285,8 @@ get.interactive.size.vs.time.plot <- function(
         "<span style=\"color:{series.options.custom}\">\u25CF</span> Quantity (shares): <b>{point.Quantity}</b>",
         "<span style=\"color:{point.color}\">\u25CF</span> {series.name} ($): <b>{point.y}</b>",
         "<span style=\"color:{point.color}\">\u25CF</span> Unit cost ($): <b>{point.UnitCost:0.2f}</b>",
-        "", sep="<br/>")))
+        "", sep="<br/>")),
+      visible=!hide.initially)
   
   hc <- hc %>%
     hc_add_series(
@@ -267,7 +301,8 @@ get.interactive.size.vs.time.plot <- function(
       fillOpacity=0.1,
       tooltip=list(pointFormat=paste(
         "<span style=\"color:{point.color}\">\u25CF</span> {series.name} ($): <b>{point.low}</b> - <b>{point.high}</b>",
-        "", sep="<br/>")))
+        "", sep="<br/>")),
+      visible=!hide.initially)
   
   hc <- hc %>%
     hc_add_series(
@@ -283,7 +318,8 @@ get.interactive.size.vs.time.plot <- function(
         "<span style=\"color:{point.color}\">\u25CF</span> {series.name} ($): <b>{point.y}</b>",
         "<span style=\"color:{point.color}\">\u25CF</span> Unit value ($): <b>{point.Price:0.2f}</b>",
         "",
-        sep="<br/>")))
+        sep="<br/>")),
+      visible=!hide.initially)
   
   hc
 }
