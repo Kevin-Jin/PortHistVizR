@@ -1,26 +1,37 @@
-reduce.on.factor <- function(frame, factor, func) {
+reduce.on.factor <- function(frame, factor.name, func) {
+  # This preserves order of each factor's first appearance in frame as opposed to natural ordering
+  #  under split's default behavior of calling as.factor.
+  factor.values <- factor(
+    as.character(frame[, factor.name]), levels=as.character(unique(frame[, factor.name])))
   frame.by.factor <- lapply(
-    split(frame[, names(frame) != factor, drop=FALSE], frame[, factor]), func)
+    split(frame[, names(frame) != factor.name, drop=FALSE], factor.values), func)
   frame.by.factor <- lapply(
     names(frame.by.factor), function(for.factor) cbind(
-      setNames(data.frame(for.factor, stringsAsFactors=FALSE), factor),
+      setNames(data.frame(for.factor, stringsAsFactors=FALSE), factor.name),
       frame.by.factor[[for.factor]]))
   frame.by.factor <- do.call(rbind, frame.by.factor)
 
   setAs("character", "Date", function(from) as.Date(from))
-  frame.by.factor[, factor] <- as(frame.by.factor[, factor], class(frame[, factor]))
+  frame.by.factor[, factor.name] <- as(frame.by.factor[, factor.name], class(frame[, factor.name]))
 
   row.names(frame.by.factor) <- c()
   frame.by.factor
 }
 
 coalesce.tx.by.date.symbol.price <- function(tx) {
+  # This does not maintain the order of all transactions under a date but it does maintain the order
+  #  of all transactions for a specific symbol under a date if all of those transactions were done
+  #  at different prices. For example, the sequence (1) buy 1 ABC at $1.00, (2) buy 1 XYZ at $1.99,
+  #  (3) buy 1 ABC at $0.99, (4) buy 1 XYZ at $2.00 will be reordered to (1) buy 1 ABC at $1.00,
+  #  (2) buy 1 ABC at $0.99, (3) buy 1 XYZ at $1.99, (4) buy 1 XYZ at $2.00.
+  # TODO: support vector of factor names to reduce.on.factor for factor interaction to eliminate
+  #  this limitation. The result would then maintain the order of the first appearances of a
+  #  (Date, Symbol, Price) tuple.
   reduce.on.factor(tx, "Date", function(tx.for.date) {
     reduce.on.factor(tx.for.date, "Symbol", function(tx.for.symbol) {
-      tx.by.price <- lapply(split(tx.for.symbol$Quantity, tx.for.symbol$Price), sum)
-      data.frame(
-        Quantity=round(unname(unlist(tx.by.price)), QTY_FRAC_DIGITS),
-        Price=as.numeric(names(tx.by.price)))
+      reduce.on.factor(tx.for.symbol, "Price", function(tx.for.price) {
+        data.frame(Quantity=round(sum(tx.for.price$Quantity), QTY_FRAC_DIGITS))
+      })
     })
   })
 }
@@ -31,18 +42,19 @@ join.cost <- function(tx) {
 }
 
 join.pct.drawdown <- function(tx) {
-  reduce.on.factor(tx, "Symbol", function(tx.for.symbol) {
+  tx$Row.Order <- 1:nrow(tx)
+  tx <- reduce.on.factor(tx, "Symbol", function(tx.for.symbol) {
     peak.price <- max(tx.for.symbol$Price)
     tx.for.symbol$Pct.Drawdown <- (1 - tx.for.symbol$Price / peak.price) * 100
     tx.for.symbol
   })
+  tx[order(tx$Row.Order), -which(colnames(tx) == "Row.Order")]
 }
 
 filter.tx <- function(tx, symbols, from.date, to.date) {
   tx <- tx[
     (is.null(symbols) | tx$Symbol %in% symbols | is.options.symbol(tx$Symbol))
     & tx$Date >= from.date & tx$Date <= to.date, ]
-  tx <- tx[order(tx$Date), ]
   tx
 }
 
@@ -146,6 +158,7 @@ calc.price.vs.time <- function(tx, symbol) {
         Average=sum(for.date$Cost) / sum(for.date$Quantity),
         Low=min(for.date$Cost / for.date$Quantity),
         High=max(for.date$Cost / for.date$Quantity)))
+    purchase.prices <- purchase.prices[order(purchase.prices$Date), ]
   } else {
     purchase.prices <- data.frame(
       Date=as.Date(character()), Average=numeric(), Low=numeric(), High=numeric())
@@ -156,6 +169,7 @@ calc.price.vs.time <- function(tx, symbol) {
         Average=sum(for.date$Cost) / sum(for.date$Quantity),
         Low=min(for.date$Cost / for.date$Quantity),
         High=max(for.date$Cost / for.date$Quantity)))
+    sale.prices <- sale.prices[order(sale.prices$Date), ]
   } else {
     sale.prices <- data.frame(
       Date=as.Date(character()), Average=numeric(), Low=numeric(), High=numeric())
@@ -172,6 +186,7 @@ calc.size.vs.price <- function(tx, symbol, bucket.width=1, carry.down.sales=TRUE
     data.frame(
       Cost=sum(for.pct.drawdown$Cost), Quantity=sum(for.pct.drawdown$Quantity))
   })
+  costs <- costs[order(costs$Pct.Drawdown), ]
   
   if (bucket.width != 0) {
     equal.spaced.buckets <- do.call(seq, c(as.list(range(tx$Pct.Drawdown)), bucket.width))
@@ -212,6 +227,7 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
       High.Price=price.provider$high.price(symbol, date, for.date),
       Quantity=round(sum(for.date$Quantity), QTY_FRAC_DIGITS))
   })
+  costs <- costs[order(costs$Date), ]
   available.price.dates <- price.provider$available.dates(symbol)
   available.price.dates <- available.price.dates[
     !(available.price.dates %in% costs$Date) & available.price.dates >= min(costs$Date)]

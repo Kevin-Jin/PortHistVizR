@@ -372,13 +372,39 @@ plot.interactive <- function(
     options.for.root <- interesting.options[[options.root]]
     calls.for.root <- options.for.root[substr(options.for.root, 13, 13) == "C"]
     puts.for.root <- options.for.root[substr(options.for.root, 13, 13) == "P"]
+    
+    # Preserve intraday transaction order if Date is already sorted ascending or descending.
+    options.tx <- tx[tx$Symbol %in% options.for.root, c("Date", "Symbol", "Quantity", "Price")]
+    if (!is.unsorted(options.tx$Date)) {
+      # Sorted in ascending order. Flip it around.
+      options.tx <- options.tx[rev(seq_len(nrow(options.tx))), ]
+    } else if (is.unsorted(rev(options.tx$Date))) {
+      # Neither sorted in ascending nor descending order. Order it ourselves.
+      options.tx <- options.tx[
+        order(options.tx$Date, options.tx$Symbol, options.tx$Price, decreasing=TRUE), ]
+    }
+    options.tx$Symbol <- gsub(" ", "&nbsp;", options.tx$Symbol)
+    # This is the best we can do for a size vs. price history across multiple strikes and expiries.
+    options.recents <- datatable(
+      head(options.tx, 10),
+      options=list(
+        pageLength=20, scrollCollapse=TRUE, paging=FALSE, scrollY=100, scrollResize=TRUE,
+        searching=FALSE),
+      plugins=c("scrollResize"),
+      rownames=FALSE,
+      escape=FALSE,
+      caption=paste("Recent", options.root, "options transactions"))
+    options.recents <- options.recents %>% formatCurrency(c("Price"), digits=4)
+    options.recents <- set.full.page.sizing.policy(options.recents)
+    
     options.plot <- combineWidgets(
       get.interactive.size.vs.time.plot(
         tx, calls.for.root, price.provider, paste(options.root, "calls")),
       get.interactive.size.vs.time.plot(
         tx, options.for.root, price.provider, paste(options.root, "options")),
       get.interactive.size.vs.time.plot(
-        tx, puts.for.root, price.provider, paste(options.root, "puts")))
+        tx, puts.for.root, price.provider, paste(options.root, "puts")),
+      options.recents)
     
     options.plot <- set.full.page.sizing.policy(options.plot)
     options.plot$elementId <- paste(options.root, "options-plots", sep="-")
