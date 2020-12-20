@@ -90,7 +90,9 @@ plot.portfolio.summary <- function(
   # The net price is the breakeven price for the symbol. The net cost is the current size of the
   #  position in the symbol.
   agg.all <- paste(
-    capture.output(print(aggregate.purchases.and.sales(tx, price.provider), row.names=FALSE)),
+    capture.output(
+      print(
+        calc.portfolio.size.snapshot.with.day.over.day.gain(tx, price.provider), row.names=FALSE)),
     collapse="\n")
   cat(agg.all)
   cat("\n")

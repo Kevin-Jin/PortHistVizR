@@ -250,8 +250,8 @@ get.interactive.size.vs.time.plot <- function(
       id="PNL",
       data=data.frame(
         x=datetime_to_timestamp(costs$Date),
-        y=costs$Value - costs$Cost,
-        DayOverDayGain=if (nrow(costs) == 0) c() else c(0, diff(costs$Value - costs$Cost))),
+        y=costs$Gain,
+        DayOverDayGain=diff(c(0, costs$Gain))),
       marker=list(symbol="diamond", radius=2),
       color=colors$yellow,
       type="area",
@@ -277,8 +277,7 @@ get.interactive.size.vs.time.plot <- function(
         x=datetime_to_timestamp(costs$Date),
         y=costs$Cost,
         Quantity=costs$Cum.Quantity,
-        UnitCost=costs$Cost / costs$Cum.Quantity,
-        Gain=costs$Gain),
+        UnitCost=costs$Cost / costs$Cum.Quantity),
       marker=list(symbol="diamond", radius=2),
       color=colors$red,
       tooltip=list(pointFormat=paste(
@@ -436,7 +435,7 @@ plot.interactive <- function(
   portfolio.plot$elementId <- "portfolio-plot"
   symbol.plots <- c(symbol.plots, list(portfolio.plot))
   
-  formatted.tx <- aggregate.purchases.and.sales.with.day.over.day.gain(tx, price.provider)
+  formatted.tx <- calc.portfolio.size.snapshot.with.day.over.day.gain(tx, price.provider)
   formatted.tx$Symbol <- gsub(" ", "&nbsp;", formatted.tx$Symbol)
   formatted.tx$Cost.Pct.Drawdown <- formatted.tx$Cost.Pct.Drawdown / 100
   formatted.tx$Value.Pct.Drawdown <- formatted.tx$Value.Pct.Drawdown / 100

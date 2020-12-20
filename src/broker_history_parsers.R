@@ -29,7 +29,7 @@ adjust.for.schwab.corporate.actions <- function(tx, commission=0.65) {
   rev.split.new.symbols <- tx[
     tx$Action == "Reverse Split" & tx$Quantity > 0, c("Date", "Symbol", "Quantity")]
   rev.split.new.symbols <- rev.split.new.symbols[order(rev.split.new.symbols$Date), ]
-  for (i in 1:nrow(rev.split.new.symbols)) {
+  for (i in seq_len(nrow(rev.split.new.symbols))) {
     is.pre.split <- (
       tx$Symbol == rev.split.new.symbols$Symbol[i] & tx$Date < rev.split.new.symbols$Date[i])
     orig.quantity <- sum(tx$Quantity[is.pre.split])
@@ -97,10 +97,12 @@ append.contra.tx <- function(tx) {
   # Options expirations are cashless transactions. Exclude those to avoid division by 0 in a day's
   #  aggregate cash change when options expirations are the only transactions for the day.
   contra.tx <- tx[tx$Symbol != "$" & tx$Amount != 0, ]
-  contra.tx$Symbol <- "$"
-  contra.tx$Price <- 1
-  contra.tx$Quantity <- contra.tx$Amount
-  contra.tx$`Fees & Comm` <- 0
+  if (nrow(contra.tx) > 0) {
+    contra.tx$Symbol <- "$"
+    contra.tx$Price <- 1
+    contra.tx$Quantity <- contra.tx$Amount
+    contra.tx$`Fees & Comm` <- 0
+  }
   
   rbind(tx, contra.tx)
 }
@@ -126,6 +128,12 @@ load.schwab.transactions <- function(export.file) {
   tx$Date <- unlist(
     lapply(strsplit(tx$Date, " as of ", fixed=TRUE), function(parts) tail(parts, 1)))
   tx$Date <- as.Date(tx$Date, "%m/%d/%Y")
+  # read.csv interprets blanks in a string column as empty strings, but read.csv can't infer Symbol
+  #  is a string column if it's blank in every row so give it a hint here. This happens if only cash
+  #  transactions exist in the history.
+  tx$Symbol[is.na(tx$Symbol)] <- ""
+  # This happens if only small buys and sells below the fee threshold exist in the history.
+  tx$`Fees & Comm`[is.na(tx$`Fees & Comm`)] <- ""
   tx <- normalize.schwab.option.symbol(tx)
   tx$Quantity <- security.actions$Sign[match(tx$Action, security.actions$Action)] * tx$Quantity
   tx$Price <- as.numeric(gsub("^(-?)\\$", "\\1", tx$Price))
@@ -193,6 +201,12 @@ normalize.fidelity.option.expirations <- function(tx.part) {
 }
 
 load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
+  security.actions <- data.frame(
+    Action=c("YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED"),
+    Sign=c(+1, +1, -1, -1))
+  cash.actions <- c(
+    "DIVIDEND RECEIVED", "ROTH CONVERSION", "ROLLOVER", "JOURNALED JNL VS A/C TYPES")
+  
   # Fidelity limits the date range in each file to one quarter, so we need to join the older files
   #  to the most recent files to get the full history.
   tx <- NULL
@@ -220,6 +234,10 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
       "Date", "Action", "Symbol", "Quantity", "Price", "Commission", "Fees", "Amount")
     
     tx.part$Date <- as.Date(tx.part$Date, "%m/%d/%Y")
+    # read.csv interprets blanks in a string column as empty strings, but read.csv can't infer
+    #  Symbol is a string column if it's blank in every row so give it a hint here. This happens if
+    #  only cash transactions exist in the history.
+    tx.part$Symbol[is.na(tx.part$Symbol)] <- ""
     tx.part <- normalize.fidelity.option.symbol(tx.part)
     tx.part$Fees[is.na(tx.part$Fees)] <- 0
     tx.part$Commission[is.na(tx.part$Commission)] <- 0
@@ -232,17 +250,18 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
     tx.part <- normalize.fidelity.option.expirations(tx.part)
     stopifnot(all(is.na(tx.part$Price) == is.na(tx.part$Quantity)))
     stopifnot(all(grepl(
-      "^(DIVIDEND RECEIVED|ROTH CONVERSION|ROLLOVER|JOURNALED JNL VS A/C TYPES)",
+      paste("^(", paste(cash.actions, collapse="|"), ")", sep=""),
       tx.part$Action[is.na(tx.part$Quantity)])))
     stopifnot(all(grepl(
-      "^(YOU BOUGHT|REINVESTMENT)",
+      paste("^(", paste(security.actions$Action[security.actions$Sign > 0], collapse="|"), ")", sep=""),
       tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity > 0])))
     stopifnot(all(grepl(
-      "^(YOU SOLD|EXPIRED)", tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity < 0])))
-    stopifnot(all(tx.part$Symbol[startsWith(tx.part$Action, "REINVESTMENT")] == cash.symbol))
+      paste("^(", paste(security.actions$Action[security.actions$Sign < 0], collapse="|"), ")", sep=""),
+      tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity < 0])))
+    stopifnot(all(tx.part$Symbol[startsWith(tx.part$Action, "REINVESTMENT")] %in% cash.symbol))
     tx.part <- normalize.cash.transactions(tx.part)
-    stopifnot(all(startsWith(tx.part$Action[tx.part$Symbol == cash.symbol], "REINVESTMENT")))
-    tx.part <- tx.part[tx.part$Symbol != cash.symbol, ]
+    stopifnot(all(startsWith(tx.part$Action[tx.part$Symbol %in% cash.symbol], "REINVESTMENT")))
+    tx.part <- tx.part[!(tx.part$Symbol %in% cash.symbol), ]
     tx.part <- adjust.options.prices(tx.part)
     tx.part <- append.contra.tx(tx.part)
     tx.part <- tx.part[, c("Date", "Symbol", "Quantity", "Price")]

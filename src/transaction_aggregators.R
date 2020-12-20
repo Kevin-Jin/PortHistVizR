@@ -58,8 +58,10 @@ filter.tx <- function(tx, symbols, from.date, to.date) {
   tx
 }
 
-aggregate.purchases.and.sales <- function(
-    tx, price.provider=recent.transaction.price.provider, date=Sys.Date()) {
+calc.portfolio.size.snapshot <- function(
+    tx, price.provider=recent.transaction.price.provider, date=max(tx$Date)) {
+  # TODO: subtract accumulated dividends from cost of $ but leave value alone.
+  # TODO: add accumulated commissions and fees to cost of $ but leave value alone.
   avg.price <- function(tx.for.factor) {
     cost <- sum(tx.for.factor$Cost)
     quantity <- round(sum(tx.for.factor$Quantity), QTY_FRAC_DIGITS)
@@ -113,12 +115,20 @@ aggregate.purchases.and.sales <- function(
   agg.all
 }
 
-aggregate.purchases.and.sales.with.day.over.day.gain <- function(
+calc.portfolio.size.snapshot.with.day.over.day.gain <- function(
     tx, price.provider=recent.transaction.price.provider) {
-  agg.all <- aggregate.purchases.and.sales(tx, price.provider)
-  agg.all.yday <- aggregate.purchases.and.sales(tx, price.provider, max(tx$Date) - 1)
+  agg.all <- calc.portfolio.size.snapshot(tx, price.provider)
+  if (any(tx$Date <= max(tx$Date) - 1)) {
+    agg.all.yday <- calc.portfolio.size.snapshot(tx, price.provider, max(tx$Date) - 1)
+  } else {
+    agg.all.yday <- data.frame(matrix(ncol=1, nrow=0, dimnames=list(NULL, c("Symbol"))))
+  }
   
   yday.idx <- match(agg.all$Symbol, agg.all.yday$Symbol)
+  # TODO: add a Dividends.And.Fees column and Day.Over.Day.Dividends.And.Fees for each symbol next
+  #  to the capital gains columns to attribute each symbol's total returns. With this and a change
+  #  to calc.size.vs.time that adds fees for options to the cost, we can remove the commission
+  #  argument to adjust.options.prices.
   yday.gain <- ifelse(is.na(yday.idx), 0, agg.all.yday$Gain[yday.idx])
   cbind(agg.all, Day.Over.Day.Gain=agg.all$Gain - yday.gain)
 }
@@ -216,6 +226,8 @@ calc.size.vs.price <- function(tx, symbol, bucket.width=1, carry.down.sales=TRUE
 }
 
 calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.price.provider) {
+  # TODO: subtract accumulated dividends from cost of $ but leave value alone.
+  # TODO: add accumulated commissions and fees to cost of $ but leave value alone.
   tx <- tx[tx$Symbol == symbol, c("Date", "Quantity", "Cost", "Price")]
   tx$Date.Copy <- tx$Date
   costs <- reduce.on.factor(tx, "Date", function(for.date) {
