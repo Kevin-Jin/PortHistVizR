@@ -1,7 +1,11 @@
 recent.transaction.price.provider <- list(
   available.dates=function(symbol) c(),
   price=function(symbol, date, tx.for.date)
-    if (is.null(tx.for.date)) NA else sum(abs(tx.for.date$Cost)) / sum(abs(tx.for.date$Quantity)),
+    if (is.null(tx.for.date)) NA
+    # Price of cash should always be $1.00 even if we acquire cash costlessly through a dividend.
+    # This is the only exception in join.cost where cost is not equal to price times quantity.
+    else if (symbol == "$") mean(tx.for.date$Price)
+    else sum(abs(tx.for.date$Cost)) / sum(abs(tx.for.date$Quantity)),
   low.price=function(symbol, date, tx.for.date)
     if (is.null(tx.for.date)) NA else min(tx.for.date$Price),
   high.price=function(symbol, date, tx.for.date)

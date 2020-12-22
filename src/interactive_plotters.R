@@ -396,6 +396,8 @@ plot.interactive <- function(
     options.recents <- options.recents %>% formatCurrency(c("Price"), digits=4)
     options.recents <- set.full.page.sizing.policy(options.recents)
     
+    # TODO: add fees for options to the cost and remove the commission argument to
+    #  adjust.options.prices and adjust.for.schwab.corporate.actions.
     options.plot <- combineWidgets(
       get.interactive.size.vs.time.plot(
         tx, calls.for.root, price.provider, paste(options.root, "calls")),
@@ -447,8 +449,8 @@ plot.interactive <- function(
     escape=FALSE)
   portfolio.summary <- portfolio.summary %>% formatCurrency(
     c(
-      "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Unit.Value", "Value", "Gain",
-      "Day.Over.Day.Gain"),
+      "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Dividends.Minus.Fees", "Unit.Value",
+      "Value", "Gain", "Day.Over.Day.Gain"),
     digits=4)
   portfolio.summary <- portfolio.summary %>% formatPercentage(
     c("Cost.Pct.Drawdown", "Value.Pct.Drawdown"), 2)

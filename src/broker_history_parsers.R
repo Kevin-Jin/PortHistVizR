@@ -98,10 +98,30 @@ append.contra.tx <- function(tx) {
   #  aggregate cash change when options expirations are the only transactions for the day.
   contra.tx <- tx[tx$Symbol != "$" & tx$Amount != 0, ]
   if (nrow(contra.tx) > 0) {
+    fees.and.comm <- contra.tx
+    # Amount is not exactly Quantity * Price because Amount is rounded to two decimal places after
+    #  Price, which has four decimal places of precision, is multiplied with Quantity. Allocate the
+    #  rounding error as a fee rather than sneaking it into the cash contra transaction to make sure
+    #  changes in cash costs are exactly equal and opposite to changes in securities costs.
+    fees.and.comm$Amount <- round(
+      fees.and.comm$Quantity * fees.and.comm$Price + fees.and.comm$Amount, 4)
+    fees.and.comm <- fees.and.comm[fees.and.comm$Amount != 0, ]
+    fees.and.comm$Quantity <- fees.and.comm$Amount
+    fees.and.comm$Reference.Symbol <- fees.and.comm$Symbol
+    fees.and.comm$Symbol <- "$"
+    fees.and.comm$Price <- 1
+    fees.and.comm$`Fees & Comm` <- 0
+    
+    # Fees impact the value of cash positions but not the cost of cash positions. Contra
+    #  transactions impact both the value and the cost of cash positions. Fee transactions are
+    #  distinguished from contra transactions by the presence of a non-empty reference symbol.
+    contra.tx$Amount <- round(-contra.tx$Quantity * contra.tx$Price, 4)
+    contra.tx$Quantity <- contra.tx$Amount
     contra.tx$Symbol <- "$"
     contra.tx$Price <- 1
-    contra.tx$Quantity <- contra.tx$Amount
     contra.tx$`Fees & Comm` <- 0
+    
+    contra.tx <- rbind(fees.and.comm, contra.tx)
   }
   
   rbind(tx, contra.tx)
@@ -141,7 +161,17 @@ load.schwab.transactions <- function(export.file) {
   tx$`Fees & Comm` <- as.numeric(gsub("^(-?)\\$", "\\1", tx$`Fees & Comm`))
   tx$Amount <- as.numeric(gsub("^(-?)\\$", "\\1", tx$Amount))
   
-  tx <- tx[, c("Date", "Action", "Symbol", "Quantity", "Price", "Fees & Comm", "Amount")]
+  tx$Reference.Symbol <- ifelse(tx$Action %in% c("Cash Dividend", "Pr Yr Cash Div"), tx$Symbol, "")
+  tx$Reference.Symbol[tx$Action == "Bank Interest"] <- "$"
+  tx$Reference.Symbol[tx$Action == "Service Fee"] <- tx$Description[tx$Action == "Service Fee"]
+  borrow.fee.matches <- regexpr("^STOCK BORROW FEE/(.+)$", tx$Reference.Symbol, perl=TRUE)
+  matched.reference.symbols <- tx$Reference.Symbol[borrow.fee.matches != -1]
+  capture.start <- attr(borrow.fee.matches, "capture.start")[borrow.fee.matches != -1, , drop=FALSE]
+  capture.stop <- capture.start + attr(borrow.fee.matches, "capture.length")[
+    borrow.fee.matches != -1, , drop=FALSE] - 1
+  tx$Reference.Symbol[borrow.fee.matches != -1] <- substr(
+    matched.reference.symbols, capture.start[, 1], capture.stop[, 1])
+  
   stopifnot(all(!is.na(tx$Date)))
   stopifnot(all(tx$Symbol != "$"))
   stopifnot(all(tx$Action %in% cash.actions == is.na(tx$Quantity)))
@@ -155,9 +185,20 @@ load.schwab.transactions <- function(export.file) {
   tx$Amount[tx$Symbol != "$"] <- -tx$Amount[tx$Symbol != "$"]
   stopifnot(max(abs(tx$Quantity * tx$Price + tx$`Fees & Comm` - tx$Amount)) < 0.01)
   
-  tx <- tx[, c("Date", "Symbol", "Quantity", "Price")]
+  tx <- tx[, c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
   stopifnot(all(!is.na(tx$Price)))
   tx
+}
+
+adjust.for.fidelity.corporate.actions <- function(tx.part, commission=0.65) {
+  # 0.65 options commission will be added to tx.part$Price by adjust.options.prices,
+  #  so remove it from the fees to avoid double counting.
+  # Price can only be 0 for options expiration transactions. Expiration has no commissions.
+  is.opt <- is.options.symbol(tx.part$Symbol) & tx.part$Price != 0
+  tx.part$`Fees & Comm`[is.opt] <- (
+    tx.part$`Fees & Comm`[is.opt] - commission * abs(tx.part$Quantity[is.opt]))
+  
+  tx.part
 }
 
 normalize.fidelity.option.symbol <- function(tx.part) {
@@ -242,9 +283,14 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
     tx.part$Fees[is.na(tx.part$Fees)] <- 0
     tx.part$Commission[is.na(tx.part$Commission)] <- 0
     tx.part$`Fees & Comm` <- tx.part$Fees + tx.part$Commission
-    tx.part <- tx.part[, colnames(tx.part)[!(colnames(tx.part) %in% c("Commission", "Fees"))]]
+    tx.part <- tx.part[, -which(colnames(tx.part) %in% c("Commission", "Fees"))]
+    tx.part$Reference.Symbol <- ""
     # Expect each file to be sorted in descending order.
     #stopifnot(diff(tx.part$Date) <= 0)
+    
+    tx.part$Reference.Symbol <- ifelse(
+      grepl("^DIVIDEND RECEIVED", tx.part$Action), tx.part$Symbol, "")
+    tx.part$Reference.Symbol[tx.part$Reference.Symbol %in% cash.symbol] <- "$"
     
     stopifnot(all(tx.part$Symbol != "$"))
     tx.part <- normalize.fidelity.option.expirations(tx.part)
@@ -262,9 +308,17 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
     tx.part <- normalize.cash.transactions(tx.part)
     stopifnot(all(startsWith(tx.part$Action[tx.part$Symbol %in% cash.symbol], "REINVESTMENT")))
     tx.part <- tx.part[!(tx.part$Symbol %in% cash.symbol), ]
+    tx.part <- adjust.for.fidelity.corporate.actions(tx.part)
     tx.part <- adjust.options.prices(tx.part)
     tx.part <- append.contra.tx(tx.part)
-    tx.part <- tx.part[, c("Date", "Symbol", "Quantity", "Price")]
+    # Make sure Quantity, Price, Fees & Comm, and Amount are consistent before removing Fees & Comm
+    #  and Amount information.
+    # Fidelity rounds unit prices to 2 decimal places even though it calculates the transaction
+    #  amount using the unit price up to 4 decimal places.
+    tx.part$Amount[tx.part$Symbol != "$"] <- -tx.part$Amount[tx.part$Symbol != "$"]
+    stopifnot(
+      max(abs(tx.part$Price - (tx.part$Amount - tx.part$`Fees & Comm`) / tx.part$Quantity)) < 0.01)
+    tx.part <- tx.part[, c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
     
     # Make tx.part and tx disjoint.
     overlap <- tx.part$Date[tx.part$Date %in% tx$Date]
@@ -303,12 +357,46 @@ load.netbenefits.transactions <- function(directory) {
   tx$Price <- tx$Amount / tx$Quantity
   stopifnot(all(tx[tx$Action == "Transfer", c("Quantity", "Amount")] == 0))
   stopifnot(all(tx[tx$Action == "REALIZED G/L", c("Quantity")] == 0))
-  tx <- tx[
-    !(tx$Action %in% c("Transfer", "REALIZED G/L")), c("Date", "Symbol", "Quantity", "Price")]
-  tx$Price <- round(tx$Price, 4)
   
   symbol.mapping <- read.csv(file.path(directory, "symbol_mapping.csv"), stringsAsFactors=FALSE)
   tx$Symbol <- symbol.mapping$Symbol[match(tx$Symbol, symbol.mapping$Investment)]
+  tx$Reference.Symbol <- ""
+  
+  # Dividends are immediately reinvested, so the value of a holding stays the same but its cost
+  #  increases since we're technically buying more of the symbol. Split up the dividend reinvestment
+  #  into a cash inflow, a purchase, and a cash outflow contra to the purchase.
+  tx$Row.Order <- seq_len(nrow(tx))
+  dividends <- tx[tx$Action == "DIVIDEND", ]
+  if (nrow(dividends) != 0) {
+    last.dividend.row <- 0
+    new.tx <- NULL
+    for (i in seq_len(nrow(dividends))) {
+      cash.inflow <- dividends[i, ]
+      cash.inflow$Symbol <- "$"
+      cash.inflow$Quantity <- cash.inflow$Amount
+      cash.inflow$Price <- 1
+      cash.inflow$Reference.Symbol <- dividends$Symbol[i]
+      cash.outflow <- dividends[i, ]
+      cash.outflow$Symbol <- "$"
+      cash.outflow$Amount <- -cash.outflow$Amount
+      cash.outflow$Quantity <- cash.outflow$Amount
+      cash.outflow$Price <- 1
+      # tx[dividends$Row.Order[i]] is the purchase, so we just need to insert the cash inflow from
+      #  the dividend and the cash contra transaction for the purchase.
+      new.tx <- rbind(
+        new.tx, tx[(last.dividend.row + 1):dividends$Row.Order[i], ], cash.outflow, cash.inflow)
+      last.dividend.row <- dividends$Row.Order[i]
+    }
+    if (last.dividend.row != nrow(tx)) {
+      new.tx <- rbind(new.tx, tx[(last.dividend.row + 1):nrow(tx), ])
+    }
+    tx <- new.tx
+  }
+  
+  tx <- tx[
+    !(tx$Action %in% c("Transfer", "REALIZED G/L")),
+    c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
+  tx$Price <- round(tx$Price, 4)
   
   tx
 }

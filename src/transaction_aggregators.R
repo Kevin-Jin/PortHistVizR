@@ -8,7 +8,9 @@ reduce.on.factor <- function(frame, factor.name, func) {
   frame.by.factor <- lapply(
     names(frame.by.factor), function(for.factor) cbind(
       setNames(data.frame(for.factor, stringsAsFactors=FALSE), factor.name),
-      frame.by.factor[[for.factor]]))
+      # This, unlike frame.by.factor[[for.factor]], lets us index list elements named "". For some
+      #  reason, is.null(setNames(list(1), "")[[""]]) but names(setNames(list(1), "")) == "".
+      frame.by.factor[[which(names(frame.by.factor) == for.factor)]]))
   frame.by.factor <- do.call(rbind, frame.by.factor)
 
   setAs("character", "Date", function(from) as.Date(from))
@@ -29,8 +31,12 @@ coalesce.tx.by.date.symbol.price <- function(tx) {
   #  (Date, Symbol, Price) tuple.
   reduce.on.factor(tx, "Date", function(tx.for.date) {
     reduce.on.factor(tx.for.date, "Symbol", function(tx.for.symbol) {
-      reduce.on.factor(tx.for.symbol, "Price", function(tx.for.price) {
-        data.frame(Quantity=round(sum(tx.for.price$Quantity), QTY_FRAC_DIGITS))
+      reduce.on.factor(tx.for.symbol, "Reference.Symbol", function(tx.for.ref.symbol) {
+        reduce.on.factor(tx.for.ref.symbol, "Price", function(tx.for.price) {
+          # Make sure we're not dropping any columns here.
+          stopifnot(colnames(tx.for.price) == "Quantity")
+          data.frame(Quantity=round(sum(tx.for.price$Quantity), QTY_FRAC_DIGITS))
+        })
       })
     })
   })
@@ -38,11 +44,25 @@ coalesce.tx.by.date.symbol.price <- function(tx) {
 
 join.cost <- function(tx) {
   tx$Cost <- tx$Price * tx$Quantity
+  # Cash transactions with a Reference.Symbol are "involuntary transactions" that are not a contra
+  #  action to a voluntary action. The cost of acquiring cash should only increase when we deposit
+  #  money into the account or sell a security. The cost of cash positions should only decline when
+  #  we withdraw money out of the account or buy a security. Cash acquisitions from dividends are
+  #  at no cost to us. Cash losses from fees and commissions do not unintuitively decrease the cost
+  #  of acquiring cash.
+  # This smooths out the portfolio's capital gains time series since capital gains that decline due
+  #  to a share price decline on the ex-dividend date should be offset by a "capital gain" in the
+  #  cash balance on the dividend payment date, though there will be a dip in the portfolio's gain
+  #  in between those dates. This should also make the portfolio's overall cost perfectly flat in
+  #  between deposits and withdrawals so that day over day gain is exactly equal to the change in
+  #  portfolio value as long as no deposits or withdrawals are made that day.
+  stopifnot(all(tx$Symbol[tx$Reference.Symbol != ""] == "$"))
+  tx$Cost[tx$Reference.Symbol != ""] <- 0
   tx
 }
 
 join.pct.drawdown <- function(tx) {
-  tx$Row.Order <- 1:nrow(tx)
+  tx$Row.Order <- seq_len(nrow(tx))
   tx <- reduce.on.factor(tx, "Symbol", function(tx.for.symbol) {
     peak.price <- max(tx.for.symbol$Price)
     tx.for.symbol$Pct.Drawdown <- (1 - tx.for.symbol$Price / peak.price) * 100
@@ -60,8 +80,6 @@ filter.tx <- function(tx, symbols, from.date, to.date) {
 
 calc.portfolio.size.snapshot <- function(
     tx, price.provider=recent.transaction.price.provider, date=max(tx$Date)) {
-  # TODO: subtract accumulated dividends from cost of $ but leave value alone.
-  # TODO: add accumulated commissions and fees to cost of $ but leave value alone.
   avg.price <- function(tx.for.factor) {
     cost <- sum(tx.for.factor$Cost)
     quantity <- round(sum(tx.for.factor$Quantity), QTY_FRAC_DIGITS)
@@ -81,6 +99,20 @@ calc.portfolio.size.snapshot <- function(
   agg.by.symbol <- agg.by.symbol[order(agg.by.symbol$Cost), ]
   row.names(agg.by.symbol) <- c()
   
+  agg.by.ref.sym <- reduce.on.factor(
+    tx[tx$Reference.Symbol != "", ], "Reference.Symbol", function(tx.for.ref.sym) {
+      data.frame(Dividends.Minus.Fees=sum(tx.for.ref.sym$Quantity * tx.for.ref.sym$Price))
+    })
+  if (is.null(agg.by.ref.sym)) {
+    agg.by.ref.sym <- data.frame(
+      matrix(ncol=2, nrow=0, dimnames=list(NULL, c("Reference.Symbol", "Dividends.Minus.Fees"))))
+  }
+  agg.by.ref.sym <- agg.by.ref.sym[
+    match(agg.by.symbol$Symbol, agg.by.ref.sym$Reference.Symbol),
+    colnames(agg.by.ref.sym) != "Reference.Symbol", drop=FALSE]
+  agg.by.ref.sym[is.na(agg.by.ref.sym)] <- 0
+  agg.by.symbol <- cbind(agg.by.symbol, agg.by.ref.sym)
+  
   agg.by.symbol$Unit.Value <- unlist(lapply(
     agg.by.symbol$Symbol,
     function(symbol) get.current.price(tx, symbol, price.provider, date)))
@@ -92,7 +124,8 @@ calc.portfolio.size.snapshot <- function(
     # TODO: calculate portfolio Pct.Drawdown.
     agg.portfolio <- cbind(
       Symbol=group.name,
-      as.data.frame(t(colSums(agg.over[, c("Cost", "Full.Rebound.Gain", "Value")]))))
+      as.data.frame(t(colSums(
+        agg.over[, c("Cost", "Full.Rebound.Gain", "Value", "Dividends.Minus.Fees")]))))
     fill.cols <- names(agg.over)[!(names(agg.over) %in% names(agg.portfolio))]
     agg.portfolio <- cbind(
       agg.portfolio,
@@ -125,10 +158,6 @@ calc.portfolio.size.snapshot.with.day.over.day.gain <- function(
   }
   
   yday.idx <- match(agg.all$Symbol, agg.all.yday$Symbol)
-  # TODO: add a Dividends.And.Fees column and Day.Over.Day.Dividends.And.Fees for each symbol next
-  #  to the capital gains columns to attribute each symbol's total returns. With this and a change
-  #  to calc.size.vs.time that adds fees for options to the cost, we can remove the commission
-  #  argument to adjust.options.prices.
   yday.gain <- ifelse(is.na(yday.idx), 0, agg.all.yday$Gain[yday.idx])
   cbind(agg.all, Day.Over.Day.Gain=agg.all$Gain - yday.gain)
 }
@@ -226,8 +255,6 @@ calc.size.vs.price <- function(tx, symbol, bucket.width=1, carry.down.sales=TRUE
 }
 
 calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.price.provider) {
-  # TODO: subtract accumulated dividends from cost of $ but leave value alone.
-  # TODO: add accumulated commissions and fees to cost of $ but leave value alone.
   tx <- tx[tx$Symbol == symbol, c("Date", "Quantity", "Cost", "Price")]
   tx$Date.Copy <- tx$Date
   costs <- reduce.on.factor(tx, "Date", function(for.date) {
