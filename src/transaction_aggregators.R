@@ -42,7 +42,7 @@ coalesce.tx.by.date.symbol.price <- function(tx) {
   })
 }
 
-join.cost <- function(tx) {
+join.cost <- function(tx, adjust.securities.costs.by.dividends.and.fees=TRUE) {
   tx$Cost <- tx$Price * tx$Quantity
   # Cash transactions with a Reference.Symbol are "involuntary transactions" that are not a contra
   #  action to a voluntary action. The cost of acquiring cash should only increase when we deposit
@@ -57,7 +57,45 @@ join.cost <- function(tx) {
   #  between deposits and withdrawals so that day over day gain is exactly equal to the change in
   #  portfolio value as long as no deposits or withdrawals are made that day.
   stopifnot(all(tx$Symbol[tx$Reference.Symbol != ""] == "$"))
-  tx$Cost[tx$Reference.Symbol != ""] <- 0
+  if (adjust.securities.costs.by.dividends.and.fees) {
+    # Rather than keep the cost of cash positions constant on involuntary actions, lower the cost of
+    #  securities positions on dividends and raise their cost on fees. This attributes the impact of
+    #  dividends to the symbol that paid them rather than just mixing together dividends across all
+    #  symbols into the gain for cash positions. For securities with substantial transaction costs,
+    #  like options, this reveals the true cost of acquiring those positions.
+    # Create a copy of each involuntary transaction. One will be the cash transaction, with cost
+    #  left equal to value, and one will be a transaction that impacts the cost of the security but
+    #  not its value.
+    tx$Row.Order <- seq_len(nrow(tx))
+    involuntaries <- tx[tx$Reference.Symbol != "", ]
+    if (nrow(involuntaries) != 0) {
+      last.involuntary.row <- 0
+      new.tx <- NULL
+      for (i in seq_len(nrow(involuntaries))) {
+        cost.adj <- involuntaries[i, ]
+        cost.adj$Symbol <- cost.adj$Reference.Symbol
+        # Leave security's value the same.
+        cost.adj$Quantity <- 0
+        cost.adj$Price <- 0
+        # Increase to cash positions is a decrease to securities positions and vice versa.
+        cost.adj$Cost <- -cost.adj$Cost
+        # tx[involuntaries$Row.Order[i]] is the cash transaction, so we just need to insert the
+        #  security transaction after it.
+        new.tx <- rbind(
+          new.tx, tx[(last.involuntary.row + 1):involuntaries$Row.Order[i], ], cost.adj)
+        last.involuntary.row <- involuntaries$Row.Order[i]
+        # Leave Reference.Symbol for both the cash transaction and security transaction non-empty
+        #  because some routines, like recent.transaction.price.provider$price, use the presence of
+        #  that field to perform different logic for involuntary actions.
+      }
+      if (last.involuntary.row != nrow(tx)) {
+        new.tx <- rbind(new.tx, tx[(last.involuntary.row + 1):nrow(tx), ])
+      }
+      tx <- new.tx
+    }
+  } else {
+    tx$Cost[tx$Reference.Symbol != ""] <- 0
+  }
   tx
 }
 
@@ -255,7 +293,7 @@ calc.size.vs.price <- function(tx, symbol, bucket.width=1, carry.down.sales=TRUE
 }
 
 calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.price.provider) {
-  tx <- tx[tx$Symbol == symbol, c("Date", "Quantity", "Cost", "Price")]
+  tx <- tx[tx$Symbol == symbol, c("Date", "Quantity", "Cost", "Price", "Reference.Symbol")]
   tx$Date.Copy <- tx$Date
   costs <- reduce.on.factor(tx, "Date", function(for.date) {
     date <- unique(for.date$Date.Copy)
@@ -266,7 +304,6 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
       High.Price=price.provider$high.price(symbol, date, for.date),
       Quantity=round(sum(for.date$Quantity), QTY_FRAC_DIGITS))
   })
-  costs <- costs[order(costs$Date), ]
   available.price.dates <- price.provider$available.dates(symbol)
   available.price.dates <- available.price.dates[
     !(available.price.dates %in% costs$Date) & available.price.dates >= min(costs$Date)]
@@ -283,6 +320,16 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
       Quantity=0))
   }
   costs <- costs[order(costs$Date), ]
+  
+  # Last observation carry forward on NA prices.
+  # This should only be needed for interest and dividend payment days since those transactions don't
+  #  have a trade price that recent.transaction.price.provider can use and there isn't necessarily a
+  #  purchase or sale that must occur on the same day unlike in the case of fee transactions.
+  valid.idx <- !is.na(costs$Average.Price)
+  costs$Average.Price <- c(NA, costs$Average.Price[valid.idx])[cumsum(valid.idx) + 1]
+  costs$Low.Price[is.na(costs$Low.Price)] <- costs$Average.Price[is.na(costs$Low.Price)]
+  costs$High.Price[is.na(costs$High.Price)] <- costs$Average.Price[is.na(costs$High.Price)]
+  
   costs$Cost <- cumsum(costs$Cost)
   costs$Value <- costs$Average.Price * cumsum(costs$Quantity)
   costs$Low.Value <- costs$Low.Price * cumsum(costs$Quantity)

@@ -373,7 +373,9 @@ plot.interactive <- function(
     puts.for.root <- options.for.root[substr(options.for.root, 13, 13) == "P"]
     
     # Preserve intraday transaction order if Date is already sorted ascending or descending.
-    options.tx <- tx[tx$Symbol %in% options.for.root, c("Date", "Symbol", "Quantity", "Price")]
+    options.tx <- tx[
+      tx$Symbol %in% options.for.root & tx$Reference.Symbol == "",
+      c("Date", "Symbol", "Quantity", "Price")]
     if (!is.unsorted(options.tx$Date)) {
       # Sorted in ascending order. Flip it around.
       options.tx <- options.tx[rev(seq_len(nrow(options.tx))), ]
@@ -383,6 +385,8 @@ plot.interactive <- function(
         order(options.tx$Date, options.tx$Symbol, options.tx$Price, decreasing=TRUE), ]
     }
     options.tx$Symbol <- gsub(" ", "&nbsp;", options.tx$Symbol)
+    # Undo the 100x contract multiplier on options unit costs to get the quoted price.
+    options.tx$Price <- options.tx$Price / 100
     # This is the best we can do for a size vs. price history across multiple strikes and expiries.
     options.recents <- datatable(
       head(options.tx, 10),
@@ -396,8 +400,6 @@ plot.interactive <- function(
     options.recents <- options.recents %>% formatCurrency(c("Price"), digits=4)
     options.recents <- set.full.page.sizing.policy(options.recents)
     
-    # TODO: add fees for options to the cost and remove the commission argument to
-    #  adjust.options.prices and adjust.for.schwab.corporate.actions.
     options.plot <- combineWidgets(
       get.interactive.size.vs.time.plot(
         tx, calls.for.root, price.provider, paste(options.root, "calls")),

@@ -1,15 +1,25 @@
 recent.transaction.price.provider <- list(
   available.dates=function(symbol) c(),
-  price=function(symbol, date, tx.for.date)
-    if (is.null(tx.for.date)) NA
-    # Price of cash should always be $1.00 even if we acquire cash costlessly through a dividend.
-    # This is the only exception in join.cost where cost is not equal to price times quantity.
-    else if (symbol == "$") mean(tx.for.date$Price)
-    else sum(abs(tx.for.date$Cost)) / sum(abs(tx.for.date$Quantity)),
-  low.price=function(symbol, date, tx.for.date)
-    if (is.null(tx.for.date)) NA else min(tx.for.date$Price),
-  high.price=function(symbol, date, tx.for.date)
-    if (is.null(tx.for.date)) NA else max(tx.for.date$Price))
+  # The only exception in join.cost where cost is not equal to quantity times price is when the
+  #  reference symbol is non-empty.
+  price=function(symbol, date, tx.for.date) {
+    tx.for.date <- tx.for.date[tx.for.date$Reference.Symbol == "", ]
+    if (is.null(tx.for.date) || nrow(tx.for.date) == 0) NA
+    # Simple average price. Position fully closed on same day and at same price it was opened.
+    else if (all(tx.for.date$Quantity == 0)) mean(tx.for.date$Price)
+    # Average price weighted by quantity.
+    else sum(abs(tx.for.date$Cost)) / sum(abs(tx.for.date$Quantity))
+  },
+  # The only exception in join.cost where price is not a traded price is when the reference symbol
+  #  is non-empty.
+  low.price=function(symbol, date, tx.for.date) {
+    tx.for.date <- tx.for.date[tx.for.date$Reference.Symbol == "", ]
+    if (is.null(tx.for.date) || nrow(tx.for.date) == 0) NA else min(tx.for.date$Price)
+  },
+  high.price=function(symbol, date, tx.for.date) {
+    tx.for.date <- tx.for.date[tx.for.date$Reference.Symbol == "", ]
+    if (is.null(tx.for.date) || nrow(tx.for.date) == 0) NA else max(tx.for.date$Price)
+  })
 
 create.price.provider.with.overrides <- function(
     override.prices, fallback=recent.transaction.price.provider) {

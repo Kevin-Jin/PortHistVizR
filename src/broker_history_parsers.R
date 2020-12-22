@@ -11,19 +11,15 @@ is.options.symbol <- function(symbol) {
   regexpr("^[\\w ]{6}\\d{6}[CP]\\d{8}$", symbol, perl=TRUE) != -1
 }
 
-adjust.options.prices <- function(prices.for.symbols, contract.multiplier=100, commission=0.65) {
+adjust.options.prices <- function(prices.for.symbols, contract.multiplier=100) {
   # Price can only be 0 for options expiration transactions. Expiration has no commissions.
   is.opt <- is.options.symbol(prices.for.symbols$Symbol) & prices.for.symbols$Price != 0
   prices.for.symbols$Price[is.opt] <- prices.for.symbols$Price[is.opt] * contract.multiplier
-  if (commission != 0) {
-    prices.for.symbols$Price[is.opt] <- (
-      prices.for.symbols$Price[is.opt] + sign(prices.for.symbols$Quantity[is.opt]) * commission)
-  }
   
   prices.for.symbols
 }
 
-adjust.for.schwab.corporate.actions <- function(tx, commission=0.65) {
+adjust.for.schwab.corporate.actions <- function(tx) {
   rev.split.orig.symbols <- tx[
     tx$Action == "Reverse Split" & tx$Quantity < 0, c("Date", "Quantity")]
   rev.split.new.symbols <- tx[
@@ -53,12 +49,6 @@ adjust.for.schwab.corporate.actions <- function(tx, commission=0.65) {
   stopifnot(all(tx[tx$Action == "Expired", "Quantity"] < 0))
   stopifnot(all(tx[tx$Action == "Assigned", "Quantity"] > 0))
   tx[is.expired, c("Price", "Fees & Comm", "Amount")] <- 0
-  
-  # 0.65 options commission will be added to tx$Price by adjust.options.prices,
-  #  so remove it from the fees to avoid double counting.
-  # Price can only be 0 for options expiration transactions. Expiration has no commissions.
-  is.opt <- is.options.symbol(tx$Symbol) & tx$Price != 0
-  tx$`Fees & Comm`[is.opt] <- tx$`Fees & Comm`[is.opt] - commission * abs(tx$Quantity[is.opt])
   
   tx
 }
@@ -190,14 +180,8 @@ load.schwab.transactions <- function(export.file) {
   tx
 }
 
-adjust.for.fidelity.corporate.actions <- function(tx.part, commission=0.65) {
-  # 0.65 options commission will be added to tx.part$Price by adjust.options.prices,
-  #  so remove it from the fees to avoid double counting.
-  # Price can only be 0 for options expiration transactions. Expiration has no commissions.
-  is.opt <- is.options.symbol(tx.part$Symbol) & tx.part$Price != 0
-  tx.part$`Fees & Comm`[is.opt] <- (
-    tx.part$`Fees & Comm`[is.opt] - commission * abs(tx.part$Quantity[is.opt]))
-  
+adjust.for.fidelity.corporate.actions <- function(tx.part) {
+  # TODO: handle splits.
   tx.part
 }
 
@@ -466,7 +450,7 @@ load.simple.prices <- function(override.file, fallback) {
   stopifnot(is.character(price.overrides$Symbol))
   stopifnot(is.numeric(price.overrides$Price))
   price.overrides$Date <- as.Date(price.overrides$Date)
-  price.overrides <- adjust.options.prices(price.overrides, commission=0)
+  price.overrides <- adjust.options.prices(price.overrides)
   names(price.overrides)[names(price.overrides) == "Price"] <- "Close"
   price.overrides$High <- price.overrides$Close
   price.overrides$Low <- price.overrides$Close
