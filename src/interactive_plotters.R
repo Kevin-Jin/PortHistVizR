@@ -30,8 +30,7 @@ get.portfolio.summary.table <- function(
       }))
       recent.dates <- head(
         sort(for.root$Date, partial=seq_len(min(6, nrow(for.root))), decreasing=TRUE), 6)
-      for.root <- for.root[
-        for.root$Date %in% recent.dates, ]
+      for.root <- for.root[for.root$Date %in% recent.dates, ]
       for.root$Symbol[order(for.root$Date, decreasing=TRUE)]
     })
   options.roots <- unique(options.roots)
@@ -44,12 +43,53 @@ get.portfolio.summary.table <- function(
   formatted.tx.options <- formatted.tx.options[order(formatted.tx.options$Symbol), ]
   
   formatted.tx <- cbind(
-    ` `=ifelse(
-      grepl(" options$", formatted.tx$Symbol) | formatted.tx$Symbol == "Miscellaneous",
-      "&#x25b9;",
-      ""),
-    formatted.tx)
-  formatted.tx <- rbind(formatted.tx, cbind(` `="", formatted.tx.options))
+    ` `=ifelse(formatted.tx$Symbol %in% c("Portfolio", "$"), "", "&#x25b9;"), formatted.tx)
+  formatted.tx <- rbind(formatted.tx, cbind(` `="&#x25b9;", formatted.tx.options))
+  # Populate disclosure widgets with recent transaction history for every stock and individual
+  #  option symbol.
+  real.symbols <- formatted.tx$Symbol[
+    formatted.tx$` ` != "" & !grepl(" options$|^Miscellaneous$", formatted.tx$Symbol)]
+  symbol.details <- setNames(lapply(real.symbols, function(symbol) {
+    for.symbol <- tx[
+      tx$Symbol == symbol & tx$Reference.Symbol == "", c("Date", "Price", "Quantity")]
+    recent.dates <- head(
+      sort(for.symbol$Date, partial=seq_len(min(10, nrow(for.symbol))), decreasing=TRUE), 10)
+    for.symbol <- for.symbol[for.symbol$Date %in% recent.dates, ]
+    # Preserve intraday transaction order if Date is already sorted ascending or descending.
+    if (!is.unsorted(for.symbol$Date) && min(for.symbol$Date) != max(for.symbol$Date)) {
+      # Sorted in ascending order. Flip it around.
+      for.symbol <- for.symbol[rev(seq_len(nrow(for.symbol))), ]
+    } else if (is.unsorted(rev(for.symbol$Date))) {
+      # Neither sorted in ascending nor descending order. Order it ourselves.
+      for.symbol <- for.symbol[order(for.symbol$Date, for.symbol$Price, decreasing=TRUE), ]
+    }
+    
+    if (is.options.symbol(symbol)) {
+      # Undo the 100x contract multiplier on options unit costs to get the quoted price.
+      for.symbol$Price <- for.symbol$Price / 100
+    }
+    html.classes <- setNames(unlist(lapply(colnames(for.symbol), function(cn) {
+      if (is.numeric(for.symbol[, cn])) "dt-right" else ""
+    })), colnames(for.symbol))
+    for.symbol$Price <- sprintf(
+      "%s\\$%0.4f", ifelse(for.symbol$Price >= 0, "", "-"), abs(for.symbol$Price))
+    gsub("\n", "", renderTags(
+      do.call(
+        tags$table,
+        c(
+          list(do.call(tags$tr, lapply(colnames(for.symbol), function(cn) tags$th(cn)))),
+          lapply(seq_len(nrow(for.symbol)), function(i) {
+            do.call(tags$tr, unname(lapply(colnames(for.symbol), function(cn) {
+              cell <- for.symbol[i, cn]
+              tags$td(cell, class=html.classes[cn])
+            })))
+          })
+        )
+      ),
+      indent=FALSE
+    )$html)
+  }), real.symbols)
+  
   formatted.tx$Symbol <- gsub(" ", "&nbsp;", formatted.tx$Symbol)
   formatted.tx$Cost.Pct.Drawdown <- formatted.tx$Cost.Pct.Drawdown / 100
   formatted.tx$Value.Pct.Drawdown <- formatted.tx$Value.Pct.Drawdown / 100
@@ -64,61 +104,123 @@ get.portfolio.summary.table <- function(
     plugins=c("scrollResize"),
     rownames=FALSE,
     escape=FALSE,
-    callback=JS(sprintf("
-      var miscSymbols = [%s];
-      
-      var closed = '\u25b9';
-      var closedHover = '\u25b8';
-      var opened = '\u25bf';
-      var openedHover = '\u25be';
-      table.cells(
-        table.rows(function(idx, data, node) { return data[0] != ''; }).indexes(), 0
-      ).nodes().to$().addClass('details-control').css({cursor: 'pointer'}).hover(
-        function() {
-          if ($(this).text() == closed) $(this).text(closedHover);
-          else if ($(this).text() == opened) $(this).text(openedHover);
-        },
-        function() {
-          if ($(this).text() == closedHover) $(this).text(closed);
-          else if ($(this).text() == openedHover) $(this).text(opened);
-        }
-      );
-      
-      var optionsRows = table.rows(function(idx, data, node) {
-        return /^[\\w ]{6}\\d{6}[CP]\\d{8}$/.test(data[1].replace(/&nbsp;/g, ' '));
-      });
-      var optionsRoots = optionsRows.iterator('row', function(context, index) {
-        return this.row(index).data()[1].replace(/&nbsp;/g, ' ').substring(0, 6).trim()
-            + '&nbsp;options';
-      }, true);
-      var optionsChildRows = optionsRows.nodes().to$().clone(true).removeClass('odd even');
-      var childRows = optionsRoots.map(function(root, i) {
-        return [root, optionsChildRows[i]];
-      }).reduce(function(groupings, row) {
-        groupings[row[0]] = groupings[row[0]] || [];
-        groupings[row[0]].push(row[1]);
-        return groupings;
-      }, Object.create(null));
-      optionsRows.remove().draw();
-      
-      var miscRows = table.rows(function(idx, data, node) {
-        return miscSymbols.includes(data[1]);
-      });
-      childRows['Miscellaneous'] = miscRows.nodes().to$().clone(true).removeClass('odd even');
-      miscRows.remove().draw();
-      
-      table.on('click', 'td.details-control', function() {
-        var td = $(this), row = table.row(td.closest('tr'));
-        if (row.child.isShown()) {
-          row.child.hide();
-          td.text(td.text() == opened ? closed : closedHover);
-          table.columns.adjust();
-        } else {
-          row.child(childRows[row.data()[1]] || []).show();
-          td.text(td.text() == closed ? opened : openedHover);
-          table.columns.adjust();
-        }
-      });", paste(shQuote(misc.symbols), collapse=", "))))
+    container=withTags(table(
+      style(type="text/css", HTML("
+        /* White triangle for normal disclosure widget controls, black triangle for hovered over
+            ones, right triangle for collapsed ones, down triangle for expanded ones. */
+        .details-control { cursor: pointer; user-select: none; }
+        .details-control::before { content: '\\25b9'; }
+        .details-control:hover::before { content: '\\25b8'; }
+        .details-control.opened::before { content: '\\25bf'; }
+        .details-control.opened:hover::before { content: '\\25be'; }
+        /* Draw black borders around groups of child rows. */
+        table.dataTable.display tr.child > td:first-child { border-left: 1px solid black; }
+        table.dataTable.display tr.child > td:last-child { border-right: 1px solid black; }
+        table.dataTable.display tr.top-child > td { border-top: 1px solid black; }
+        table.dataTable.display tr.bottom-child > td { border-bottom: 1px solid black; }
+        table.dataTable tr.symbol-info > td div { padding: 8px 10px; background-color: #eee; }
+      ")),
+      tableHeader(colnames(formatted.tx), FALSE)
+    )),
+    callback=JS(sprintf(
+      "
+        var miscSymbols = [%s];
+        var symbolDetails = {%s};
+        
+        table.cells(
+          table.rows(function(idx, data, node) { return data[0] != ''; }).indexes(), 0
+        ).nodes().to$().addClass('details-control').text('');
+        
+        var optionsRows = table.rows(function(idx, data, node) {
+          return /^[\\w ]{6}\\d{6}[CP]\\d{8}$/.test(data[1].replace(/&nbsp;/g, ' '));
+        });
+        var optionsRoots = optionsRows.iterator('row', function(context, index) {
+          return this.row(index).data()[1].replace(/&nbsp;/g, ' ').substring(0, 6).trim()
+              + '&nbsp;options';
+        }, true);
+        var optionsChildRows = optionsRows.nodes().to$().clone(true).removeClass(
+          'odd even').addClass('child');
+        var childRows = optionsRoots.map(function(root, i) {
+          return [root, optionsChildRows[i]];
+        }).reduce(function(groupings, row) {
+          groupings[row[0]] = groupings[row[0]] || [];
+          groupings[row[0]].push(row[1]);
+          return groupings;
+        }, Object.create(null));
+        optionsRows.remove().draw();
+        
+        var miscRows = table.rows(function(idx, data, node) {
+          return miscSymbols.includes(data[1]);
+        });
+        childRows['Miscellaneous'] = miscRows.nodes().to$().clone(true).removeClass(
+          'odd even').addClass('child');
+        miscRows.remove().draw();
+        
+        table.on('click', 'td.details-control', function() {
+          // Use DataTables's native child rows functionality for expanding options and misc.
+          var td = $(this), tr = td.closest('tr'); row = table.row(tr);
+          if (!tr.hasClass('child') && row.data()[1] in childRows) {
+            if (row.child.isShown()) {
+              row.child().each(function() {
+                var childTr = $(this);
+                var childTd = childTr.find('td.details-control');
+                if (childTd.hasClass('opened')) {
+                  var grandchildrenCount = childTr.data('childrenCount') || 0;
+                  childTr.nextAll().slice(0, grandchildrenCount).remove();
+                  childTd.removeClass('opened');
+                }
+              });
+              row.child.hide();
+              td.removeClass('opened');
+              table.columns.adjust();
+            } else {
+              row.child(childRows[row.data()[1]]).show();
+              row.child().first().addClass('top-child');
+              row.child().last().addClass('bottom-child');
+              td.addClass('opened');
+              table.columns.adjust();
+            }
+          } else {
+            // DataTables doesn't support nested child rows. Roll our own barebones disclosure
+            //  widgets for expanding details under individual options and miscellaneous stocks.
+            if (td.hasClass('opened')) {
+              var childrenCount = tr.data('childrenCount') || 0;
+              var children = tr.nextAll().slice(0, childrenCount);
+              if (children.last().hasClass('bottom-child')) {
+                tr.addClass('bottom-child');
+              }
+              children.remove();
+              td.removeClass('opened');
+            } else {
+              var colspan = $.map(
+                tr.find('td'),
+                function() { return parseInt($(this).attr('colspan') || '1'); }
+              ).reduce(function(acc, el) { return acc + el; }, 0);
+              var children = $('<tr/>').addClass('symbol-info').append(
+                $('<td/>').attr('colspan', colspan).append(
+                  $('<div/>').html(
+                    symbolDetails[tr.find('td:nth-child(2)').text().replace(/\u00a0/g, ' ')] || ''
+                  )
+                )
+              );
+              if (tr.hasClass('child')) {
+                children.addClass('child');
+              }
+              tr.after(children);
+              tr.data('childrenCount', 1);
+              if (tr.hasClass('bottom-child')) {
+                tr.removeClass('bottom-child');
+                children.last().addClass('bottom-child');
+              }
+              td.addClass('opened');
+            }
+          }
+        });
+      ",
+      paste(shQuote(misc.symbols), collapse=", "),
+      paste(lapply(names(symbol.details), function(symbol) {
+        paste(shQuote(symbol), shQuote(symbol.details[[symbol]]), sep=": ")
+      }), collapse=", "))))
   
   portfolio.summary <- portfolio.summary %>% formatCurrency(
     c(
@@ -499,42 +601,13 @@ plot.interactive <- function(
     calls.for.root <- options.for.root[substr(options.for.root, 13, 13) == "C"]
     puts.for.root <- options.for.root[substr(options.for.root, 13, 13) == "P"]
     
-    # Preserve intraday transaction order if Date is already sorted ascending or descending.
-    options.tx <- tx[
-      tx$Symbol %in% options.for.root & tx$Reference.Symbol == "",
-      c("Date", "Symbol", "Quantity", "Price")]
-    if (!is.unsorted(options.tx$Date)) {
-      # Sorted in ascending order. Flip it around.
-      options.tx <- options.tx[rev(seq_len(nrow(options.tx))), ]
-    } else if (is.unsorted(rev(options.tx$Date))) {
-      # Neither sorted in ascending nor descending order. Order it ourselves.
-      options.tx <- options.tx[
-        order(options.tx$Date, options.tx$Symbol, options.tx$Price, decreasing=TRUE), ]
-    }
-    options.tx$Symbol <- gsub(" ", "&nbsp;", options.tx$Symbol)
-    # Undo the 100x contract multiplier on options unit costs to get the quoted price.
-    options.tx$Price <- options.tx$Price / 100
-    # This is the best we can do for a size vs. price history across multiple strikes and expiries.
-    options.recents <- datatable(
-      head(options.tx, 10),
-      options=list(
-        pageLength=20, scrollCollapse=TRUE, paging=FALSE, scrollY=100, scrollResize=TRUE,
-        searching=FALSE),
-      plugins=c("scrollResize"),
-      rownames=FALSE,
-      escape=FALSE,
-      caption=paste("Recent", options.root, "options transactions"))
-    options.recents <- options.recents %>% formatCurrency(c("Price"), digits=4)
-    options.recents <- set.full.page.sizing.policy(options.recents)
-    
     options.plot <- combineWidgets(
       get.interactive.size.vs.time.plot(
         tx, calls.for.root, price.provider, paste(options.root, "calls")),
       get.interactive.size.vs.time.plot(
         tx, options.for.root, price.provider, paste(options.root, "options")),
       get.interactive.size.vs.time.plot(
-        tx, puts.for.root, price.provider, paste(options.root, "puts")),
-      options.recents)
+        tx, puts.for.root, price.provider, paste(options.root, "puts")))
     
     options.plot <- set.full.page.sizing.policy(options.plot)
     options.plot$elementId <- paste(options.root, "options-plots", sep="-")
