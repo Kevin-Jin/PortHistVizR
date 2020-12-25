@@ -157,13 +157,21 @@ calc.portfolio.size.snapshot <- function(
   agg.by.symbol$Value <- agg.by.symbol$Quantity * agg.by.symbol$Unit.Value
   agg.by.symbol$Value.Pct.Drawdown <- (
     1 - agg.by.symbol$Unit.Value / agg.by.symbol$Peak.Price) * 100
+  agg.by.symbol$Gain <- agg.by.symbol$Value - agg.by.symbol$Cost
   
+  agg.by.symbol
+}
+
+group.options.and.total.in.portfolio.size.snapshot <- function(agg.by.symbol, misc.symbols) {
   aggregate.on.portfolio <- function(group.name, agg.over) {
     # TODO: calculate portfolio Pct.Drawdown.
     agg.portfolio <- cbind(
       Symbol=group.name,
       as.data.frame(t(colSums(
-        agg.over[, c("Cost", "Full.Rebound.Gain", "Value", "Dividends.Minus.Fees")]))))
+        agg.over[, c(
+          "Cost", "Full.Rebound.Gain", "Value", "Dividends.Minus.Fees", "Gain",
+          "Day.Over.Day.Gain")]))),
+      stringsAsFactors=FALSE)
     fill.cols <- names(agg.over)[!(names(agg.over) %in% names(agg.portfolio))]
     agg.portfolio <- cbind(
       agg.portfolio,
@@ -181,8 +189,11 @@ calc.portfolio.size.snapshot <- function(
   
   agg.all <- agg.by.symbol[!is.options.symbol(agg.by.symbol$Symbol), ]
   agg.all <- rbind(agg.all, agg.options)
+  if (length(misc.symbols) != 0) {
+    agg.all <- rbind(
+      agg.all, aggregate.on.portfolio("Miscellaneous", agg.all[agg.all$Symbol %in% misc.symbols, ]))
+  }
   agg.all <- rbind(agg.all, aggregate.on.portfolio("Portfolio", agg.all))
-  agg.all$Gain <- agg.all$Value - agg.all$Cost
   agg.all
 }
 

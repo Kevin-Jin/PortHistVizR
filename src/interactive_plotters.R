@@ -5,6 +5,133 @@ colors <- list(
   yellow="#E4D354"
 )
 
+get.portfolio.summary.table <- function(
+    tx, misc.symbols, price.provider=recent.transaction.price.provider) {
+  formatted.tx.all <- calc.portfolio.size.snapshot.with.day.over.day.gain(tx, price.provider)
+  # For now, always treat options as interesting symbols.
+  misc.symbols <- misc.symbols[!grepl(" options$", misc.symbols)]
+  formatted.tx <- group.options.and.total.in.portfolio.size.snapshot(formatted.tx.all, misc.symbols)
+  
+  formatted.tx.options <- formatted.tx.all[is.options.symbol(formatted.tx.all$Symbol), ]
+  options.roots <- sub("\\s+$", "", substr(formatted.tx.options$Symbol, 1, 6))
+  # First, grab all options positions that are currently open.
+  open.options.by.root <- split(
+    formatted.tx.options$Symbol[formatted.tx.options$Quantity != 0],
+    options.roots[formatted.tx.options$Quantity != 0])
+  # Then, grab the most recently transacted options until we have at least 6 per root.
+  closed.options.by.root <- lapply(
+    split(
+      formatted.tx.options$Symbol[formatted.tx.options$Quantity == 0],
+      options.roots[formatted.tx.options$Quantity == 0]
+    ), function(for.root) {
+      for.root <- unique(tx[tx$Symbol %in% for.root, c("Symbol", "Date")])
+      for.root <- do.call(rbind, lapply(split(for.root, for.root$Symbol), function(for.symbol) {
+        data.frame(Symbol=for.symbol$Symbol[1], Date=max(for.symbol$Date), stringsAsFactors=FALSE)
+      }))
+      recent.dates <- head(
+        sort(for.root$Date, partial=seq_len(min(6, nrow(for.root))), decreasing=TRUE), 6)
+      for.root <- for.root[
+        for.root$Date %in% recent.dates, ]
+      for.root$Symbol[order(for.root$Date, decreasing=TRUE)]
+    })
+  options.roots <- unique(options.roots)
+  include.options <- do.call(
+    c,
+    Map(function(open.for.root, closed.for.root) {
+      c(open.for.root, head(closed.for.root, 6 - min(length(open.for.root), 6)))
+    }, open.options.by.root[options.roots], closed.options.by.root[options.roots]))
+  formatted.tx.options <- formatted.tx.options[formatted.tx.options$Symbol %in% include.options, ]
+  formatted.tx.options <- formatted.tx.options[order(formatted.tx.options$Symbol), ]
+  
+  formatted.tx <- cbind(
+    ` `=ifelse(
+      grepl(" options$", formatted.tx$Symbol) | formatted.tx$Symbol == "Miscellaneous",
+      "&#x25b9;",
+      ""),
+    formatted.tx)
+  formatted.tx <- rbind(formatted.tx, cbind(` `="", formatted.tx.options))
+  formatted.tx$Symbol <- gsub(" ", "&nbsp;", formatted.tx$Symbol)
+  formatted.tx$Cost.Pct.Drawdown <- formatted.tx$Cost.Pct.Drawdown / 100
+  formatted.tx$Value.Pct.Drawdown <- formatted.tx$Value.Pct.Drawdown / 100
+  
+  portfolio.summary <- datatable(
+    formatted.tx,
+    options=list(
+      pageLength=20, scrollCollapse=TRUE, paging=FALSE, scrollY=100, scrollResize=TRUE,
+      columnDefs = list(
+        list(orderable=FALSE, targets=0)
+      )),
+    plugins=c("scrollResize"),
+    rownames=FALSE,
+    escape=FALSE,
+    callback=JS(sprintf("
+      var miscSymbols = [%s];
+      
+      var closed = '\u25b9';
+      var closedHover = '\u25b8';
+      var opened = '\u25bf';
+      var openedHover = '\u25be';
+      table.cells(
+        table.rows(function(idx, data, node) { return data[0] != ''; }).indexes(), 0
+      ).nodes().to$().addClass('details-control').css({cursor: 'pointer'}).hover(
+        function() {
+          if ($(this).text() == closed) $(this).text(closedHover);
+          else if ($(this).text() == opened) $(this).text(openedHover);
+        },
+        function() {
+          if ($(this).text() == closedHover) $(this).text(closed);
+          else if ($(this).text() == openedHover) $(this).text(opened);
+        }
+      );
+      
+      var optionsRows = table.rows(function(idx, data, node) {
+        return /^[\\w ]{6}\\d{6}[CP]\\d{8}$/.test(data[1].replace(/&nbsp;/g, ' '));
+      });
+      var optionsRoots = optionsRows.iterator('row', function(context, index) {
+        return this.row(index).data()[1].replace(/&nbsp;/g, ' ').substring(0, 6).trim()
+            + '&nbsp;options';
+      }, true);
+      var optionsChildRows = optionsRows.nodes().to$().clone(true).removeClass('odd even');
+      var childRows = optionsRoots.map(function(root, i) {
+        return [root, optionsChildRows[i]];
+      }).reduce(function(groupings, row) {
+        groupings[row[0]] = groupings[row[0]] || [];
+        groupings[row[0]].push(row[1]);
+        return groupings;
+      }, Object.create(null));
+      optionsRows.remove().draw();
+      
+      var miscRows = table.rows(function(idx, data, node) {
+        return miscSymbols.includes(data[1]);
+      });
+      childRows['Miscellaneous'] = miscRows.nodes().to$().clone(true).removeClass('odd even');
+      miscRows.remove().draw();
+      
+      table.on('click', 'td.details-control', function() {
+        var td = $(this), row = table.row(td.closest('tr'));
+        if (row.child.isShown()) {
+          row.child.hide();
+          td.text(td.text() == opened ? closed : closedHover);
+          table.columns.adjust();
+        } else {
+          row.child(childRows[row.data()[1]] || []).show();
+          td.text(td.text() == closed ? opened : openedHover);
+          table.columns.adjust();
+        }
+      });", paste(shQuote(misc.symbols), collapse=", "))))
+  
+  portfolio.summary <- portfolio.summary %>% formatCurrency(
+    c(
+      "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Dividends.Minus.Fees", "Unit.Value",
+      "Value", "Gain", "Day.Over.Day.Gain"),
+    digits=4)
+  portfolio.summary <- portfolio.summary %>% formatPercentage(
+    c("Cost.Pct.Drawdown", "Value.Pct.Drawdown"), 2)
+  portfolio.summary <- set.full.page.sizing.policy(portfolio.summary)
+  portfolio.summary$elementId <- "portfolio-summary"
+  portfolio.summary
+}
+
 get.interactive.price.vs.time.plot <- function(
     tx, symbol, price.provider=recent.transaction.price.provider, arearange=FALSE,
     pct.drawdown.major=TRUE) {
@@ -439,25 +566,7 @@ plot.interactive <- function(
   portfolio.plot$elementId <- "portfolio-plot"
   symbol.plots <- c(symbol.plots, list(portfolio.plot))
   
-  formatted.tx <- calc.portfolio.size.snapshot.with.day.over.day.gain(tx, price.provider)
-  formatted.tx$Symbol <- gsub(" ", "&nbsp;", formatted.tx$Symbol)
-  formatted.tx$Cost.Pct.Drawdown <- formatted.tx$Cost.Pct.Drawdown / 100
-  formatted.tx$Value.Pct.Drawdown <- formatted.tx$Value.Pct.Drawdown / 100
-  portfolio.summary <- datatable(
-    formatted.tx,
-    options=list(pageLength=20, scrollCollapse=TRUE, paging=FALSE, scrollY=100, scrollResize=TRUE),
-    plugins=c("scrollResize"),
-    rownames=FALSE,
-    escape=FALSE)
-  portfolio.summary <- portfolio.summary %>% formatCurrency(
-    c(
-      "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Dividends.Minus.Fees", "Unit.Value",
-      "Value", "Gain", "Day.Over.Day.Gain"),
-    digits=4)
-  portfolio.summary <- portfolio.summary %>% formatPercentage(
-    c("Cost.Pct.Drawdown", "Value.Pct.Drawdown"), 2)
-  portfolio.summary <- set.full.page.sizing.policy(portfolio.summary)
-  portfolio.summary$elementId <- "portfolio-summary"
+  portfolio.summary <- get.portfolio.summary.table(tx, miscellaneous.symbols, price.provider)
   symbol.plots <- c(list(portfolio.summary), symbol.plots)
   
   hc <- combineWidgets(list=symbol.plots, ncol=1)
