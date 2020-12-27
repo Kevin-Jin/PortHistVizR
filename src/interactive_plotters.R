@@ -552,6 +552,269 @@ get.interactive.size.vs.time.plot <- function(
   hc
 }
 
+get.interactive.option.payoff.plot <- function(
+    tx, options.for.root, options.root, price.provider=recent.transaction.price.provider) {
+  current.spot <- get.current.price(tx, options.root, price.provider)
+  reference.date <- max(tx$Date)
+  tx <- tx[tx$Symbol %in% options.for.root, ]
+  
+  tx <- calc.portfolio.size.snapshot(tx, price.provider)
+  tx <- tx[tx$Quantity != 0, c("Symbol", "Quantity", "Cost", "Value")]
+  claim.type.mapping <- data.frame(Letter=c("C", "P"), Slope=c(+100, -100), stringsAsFactors=FALSE)
+  tx$Expiry <- as.Date(
+    paste(
+      rep(as.character(as.POSIXlt(reference.date)$year %/% 100 + 19), nrow(tx)),
+      substr(tx$Symbol, 7, 12),
+      sep=""),
+    "%Y%m%d")
+  # Some Y2100 future proofing.
+  tx$Expiry[tx$Expiry < reference.date] <- do.call(
+    c,
+    lapply(
+      tx$Expiry[tx$Expiry < reference.date],
+      function(expiry) seq(expiry, by="100 years", length.out=2)[2]))
+  tx$Itm.Unit.Slope <- claim.type.mapping$Slope[
+    match(substr(tx$Symbol, 13, 13), claim.type.mapping$Letter)]
+  tx$Strike <- as.integer(substr(tx$Symbol, 14, 21)) / 1000
+  tx <- tx[order(tx$Expiry, tx$Strike), ]
+  # All expiries share the same axes, so use common strikes for the end of the extrapolation.
+  extrap.strikes <- if (nrow(tx) == 0) c(0, 0) else range(tx$Strike)
+  # For outright options, display values for realized spot between 90% to 110% of the strike.
+  extrap.length <- mean(tx$Strike) / 10
+  if (extrap.strikes[1] != extrap.strikes[2]) {
+    # Reduce the scale when we have very narrow spreads.
+    extrap.length <- min(diff(extrap.strikes), extrap.length)
+  }
+  if (!is.na(current.spot)) {
+    # If we need to extend the extrapolation in one direction to hit the current spot, make the
+    #  extension symmetric.
+    extrap.length <- max(c(+1, -1) * (extrap.strikes - current.spot), extrap.length)
+  }
+  # Make sure the extrapolated strikes don't coincide with any actual strike in positions.
+  stopifnot(extrap.length != 0 || nrow(tx) == 0)
+  extrap.strikes <- extrap.strikes + c(-1, +1) * extrap.length
+  
+  payoff.params <- tx[, c("Quantity", "Itm.Unit.Slope", "Strike")]
+  # The knots of the payoff diagram, between which the payoff should be linearly interpolated, for
+  #  each expiry.
+  payoff.diagrams <- lapply(split(payoff.params, tx$Expiry), function(for.expiry) {
+    # Strikes are the only inflection points in the payoff diagram. Calculate the expiration value
+    #  at the current spot and extrapolation end points as well to plot their markers in the graph.
+    inflection.points <- c(extrap.strikes[1], for.expiry$Strike, extrap.strikes[2])
+    if (!is.na(current.spot)) {
+      inflection.points <- unique(sort(c(inflection.points, current.spot)))
+    }
+    inflection.points <- inflection.points
+    
+    by.claim.type <- setNames(lapply(claim.type.mapping$Slope, function(claim.type) {
+      for.claim.type <- for.expiry[for.expiry$Itm.Unit.Slope == claim.type, ]
+      for.claim.type <- rbind(
+        for.claim.type,
+        data.frame(
+          Quantity=0,
+          Itm.Unit.Slope=0,
+          Strike=inflection.points[!(inflection.points %in% for.claim.type$Strike)]))
+      # For puts: each individual right derivative is 0, so start from biggest strike and work to
+      #  smaller strikes.
+      # For calls: each individual left derivative is 0, so start from smallest strike and work to
+      #  bigger strikes.
+      for.claim.type <- for.claim.type[order(for.claim.type$Strike, decreasing=claim.type < 0), ]
+      # For puts: left derivative of the payoff diagram evaluated at each strike.
+      # For calls: right derivative of the payoff diagram evaluated at each strike.
+      for.claim.type$Next.Slope <- cumsum(for.claim.type$Itm.Unit.Slope * for.claim.type$Quantity)
+      # For puts: integral using a constant of integration such that value is 0 at the biggest
+      #  strike.
+      # For calls: integral using a constant of integration such that value is 0 at the smallest
+      #  strike.
+      for.claim.type$Value <- cumsum(
+        c(0, head(for.claim.type$Next.Slope, -1) * diff(for.claim.type$Strike)))
+      # For puts: reorder so strike is increasing.
+      if (claim.type < 0) {
+        for.claim.type <- for.claim.type[rev(seq_len(nrow(for.claim.type))), ]
+      }
+      for.claim.type
+    }), claim.type.mapping$Letter)
+    
+    data.frame(
+      Realized.Spot=inflection.points,
+      Value=by.claim.type[["C"]]$Value + by.claim.type[["P"]]$Value)
+  })
+  
+  hc <- highchart() %>%
+    hc_chart(zoomType="xy") %>%
+    hc_title(text=paste(options.root, "options Expiration value vs. Realized spot")) %>%
+    hc_tooltip(
+      shared=TRUE,
+      headerFormat="<span style=\"font-size: 10px\">Realized.Spot: ${point.x:0.2f}</span><br/>",
+      borderColor=colors$blue) %>%
+    hc_xAxis(title=list(text="Realized.Spot"), gridLineWidth=1) %>%
+    hc_yAxis(title=list(text="Position Size"))
+  
+  is.strictly.sorted <- function(a, b, c) {
+    a < b && b < c || a > b && b > c
+  }
+  for (expiry in names(payoff.diagrams)) {
+    current.sizes <- colSums(tx[tx$Expiry == as.Date(expiry), c("Cost", "Value")])
+    # Solve for the breakeven strikes at which the expiration value intersects with current value or
+    #  current cost.
+    for.expiry <- payoff.diagrams[[expiry]]
+    interp.to.current.sizes <- do.call(rbind, lapply(unname(current.sizes), function(interp.v) {
+      first.v <- for.expiry$Value[1]
+      second.v <- for.expiry$Value[2]
+      penult.v <- for.expiry$Value[nrow(for.expiry) - 1]
+      last.v <- for.expiry$Value[nrow(for.expiry)]
+      for.interp.v <- matrix(nrow=0, ncol=2, dimnames=list(NULL, c("Realized.Spot", "Value")))
+      if (is.strictly.sorted(interp.v, first.v, second.v)) {
+        # Linearly extrapolate v left to s such that v(s) == interp.v.
+        first.s <- for.expiry$Realized.Spot[1]
+        second.s <- for.expiry$Realized.Spot[2]
+        # Divide (interp.v - first.v) by slope to get (interp.s - first.s) and then add first.s.
+        interp.s <- (interp.v - first.v) * (first.s - second.s) / (first.v - second.v) + first.s
+        for.interp.v <- rbind(for.interp.v, c(interp.s, interp.v))
+      }
+      for (i in seq_len(nrow(for.expiry) - 1)) {
+        prev.v <- for.expiry$Value[i]
+        next.v <- for.expiry$Value[i + 1]
+        if (is.strictly.sorted(prev.v, interp.v, next.v)) {
+          # Linearly interpolate v to s such that v(s) == interp.v.
+          prev.s <- for.expiry$Realized.Spot[i]
+          next.s <- for.expiry$Realized.Spot[i + 1]
+          # Divide (interp.v - prev.v) by slope to get (interp.s - prev.s) and then add prev.s.
+          interp.s <- (interp.v - prev.v) * (next.s - prev.s) / (next.v - prev.v) + prev.s
+          for.interp.v <- rbind(for.interp.v, c(interp.s, interp.v))
+        }
+      }
+      if (is.strictly.sorted(penult.v, last.v, interp.v)) {
+        # Linearly extrapolate v right to s such that v(s) == interp.v.
+        penult.s <- for.expiry$Realized.Spot[nrow(for.expiry) - 1]
+        last.s <- for.expiry$Realized.Spot[nrow(for.expiry)]
+        # Divide (interp.v - last.v) by slope to get (interp.s - last.s) and then add last.s.
+        interp.s <- (interp.v - last.v) * (last.s - penult.s) / (last.v - penult.v) + last.s
+        for.interp.v <- rbind(for.interp.v, c(interp.s, interp.v))
+      }
+      as.data.frame(for.interp.v)
+    }))
+    # Throw out initial extrapolations if extrapolations were extended to hit current sizes.
+    if (min(interp.to.current.sizes$Realized.Spot, +Inf) < min(for.expiry$Realized.Spot)) {
+      for.expiry <- tail(for.expiry, -1)
+    }
+    if (max(interp.to.current.sizes$Realized.Spot, -Inf) > max(for.expiry$Realized.Spot)) {
+      for.expiry <- head(for.expiry, -1)
+    }
+    # Extended extrapolations break the shared x-axis between all expiries, but it's not a big deal.
+    for.expiry <- rbind(for.expiry, interp.to.current.sizes)
+    for.expiry <- for.expiry[order(for.expiry$Realized.Spot), ]
+    
+    hc <- hc %>%
+      hc_add_series(
+        name=expiry,
+        id=expiry,
+        data=setNames(for.expiry, c("x", "y")),
+        tooltip=list(
+          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Expiration value: <b>${point.y:0.4f}</b><br/>"),
+        marker=list(symbol="diamond", radius=2),
+        color=colors$blue)
+    hc <- hc %>%
+      hc_add_series(
+        name=paste(expiry, "current value"),
+        data=data.frame(x=for.expiry$Realized.Spot, y=unname(current.sizes["Value"])),
+        dashStyle="Dash",
+        tooltip=list(
+          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Current value: <b>${point.y:0.4f}</b><br/>"),
+        marker=list(symbol="diamond", radius=2, enabled=FALSE),
+        color=colors$green,
+        linkedTo=expiry,
+        showInLegend=FALSE)
+    hc <- hc %>%
+      hc_add_series(
+        name=paste(expiry, "current cost"),
+        data=data.frame(x=for.expiry$Realized.Spot, y=unname(current.sizes["Cost"])),
+        dashStyle="Dash",
+        tooltip=list(
+          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Current cost: <b>${point.y:0.4f}</b><br/>"),
+        marker=list(symbol="diamond", radius=2, enabled=FALSE),
+        color=colors$red,
+        linkedTo=expiry,
+        showInLegend=FALSE)
+  }
+  
+  if (length(payoff.diagrams) != 0 && !is.na(current.spot)) {
+    value.range <- range(do.call(c, lapply(payoff.diagrams, function(for.expiry) for.expiry$Value)))
+    # Incorporate current cost and current value in value.range.
+    value.range <- range(c(do.call(c, lapply(split(tx, tx$Expiry), function(for.expiry) {
+      colSums(for.expiry[, c("Cost", "Value")])
+    })), value.range))
+    # Place the current spot marker near the actual expiration value(s) at that realized spot.
+    value.range <- c(mean(unlist(lapply(payoff.diagrams, function(for.expiry) {
+      for.expiry$Value[for.expiry$Realized.Spot == current.spot]
+    }))), value.range)
+    hc <- hc %>%
+      hc_add_series(
+        name="Current spot",
+        data=data.frame(x=current.spot, y=value.range),
+        dashStyle="Dash",
+        tooltip=list(
+          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> {series.name}: <b>${point.x:0.4f}</b><br/>"),
+        color=colors$yellow)
+  }
+  
+  # Dummy series with no data just for the sake of legend entries with special handling.
+  hc <- hc %>%
+    hc_add_series(
+      name="Current cost",
+      dashStyle="Dash",
+      marker=list(symbol="diamond", radius=2, enabled=FALSE),
+      color=colors$red
+    )
+  hc <- hc %>%
+    hc_add_series(
+      name="Current value",
+      dashStyle="Dash",
+      marker=list(symbol="diamond", radius=2, enabled=FALSE),
+      color=colors$green
+    )
+  hc <- hc %>%
+    hc_plotOptions(
+      series=list(
+        events=list(
+          legendItemClick=JS("
+            function(event) {
+              var thisName = this.name;
+              if (thisName == 'Current cost' || this.name == 'Current value') {
+                var thisVisible = this.visible;
+                this.chart.series.filter(function(series) {
+                  return (
+                    series.name.endsWith(thisName.toLowerCase()) && series.linkedParent.visible);
+                }).forEach(function(series) {
+                  if (thisVisible) series.hide(); else series.show();
+                });
+              } else if (!this.visible) {
+                var thisLinkedSeries = this.linkedSeries;
+                // Override default behavior so we can hide linked series after showing the parent.
+                event.preventDefault();
+                this.show();
+                this.chart.series.filter(function(series) {
+                  return (
+                    (series.name == 'Current cost' || series.name == 'Current value')
+                    && !series.visible);
+                }).forEach(function(series) {
+                  thisLinkedSeries.filter(function(linkedSeries) {
+                    return linkedSeries.name.endsWith(series.name.toLowerCase());
+                  }).forEach(function(linkedSeries) {
+                    linkedSeries.hide();
+                  });
+                });
+              }
+              // TODO: make expiry series mutually exclusive to eliminate confusion between current
+              //  costs and values? Effectively their legend items would serve as radio buttons.
+            }")
+        )
+      )
+    )
+  
+  hc
+}
+
 set.full.page.sizing.policy <- function(widget) {
   widget$sizingPolicy$browser$padding <- 0
   widget$sizingPolicy$browser$fill <- FALSE
@@ -607,7 +870,8 @@ plot.interactive <- function(
       get.interactive.size.vs.time.plot(
         tx, options.for.root, price.provider, paste(options.root, "options")),
       get.interactive.size.vs.time.plot(
-        tx, puts.for.root, price.provider, paste(options.root, "puts")))
+        tx, puts.for.root, price.provider, paste(options.root, "puts")),
+      get.interactive.option.payoff.plot(tx, options.for.root, options.root, price.provider))
     
     options.plot <- set.full.page.sizing.policy(options.plot)
     options.plot$elementId <- paste(options.root, "options-plots", sep="-")

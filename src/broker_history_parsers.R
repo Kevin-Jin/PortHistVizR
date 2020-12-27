@@ -416,7 +416,8 @@ load.alphavantage.prices <- function(directory, fallback) {
     stopifnot(endsWith(file, ".csv"))
     symbol <- substr(file, 1, nchar(file) - 4)
     for.symbol <- read.csv(file.path(directory, file), stringsAsFactors=FALSE)
-    for.symbol$timestamp <- as.Date(for.symbol$timestamp)
+    for.symbol$timestamp <- (
+      if (is.null(for.symbol$timestamp)) NULL else as.Date(for.symbol$timestamp))
     # Calculate our own adjusted close that only takes into account splits and stock dividends, but
     #  not cash dividends. Otherwise there will be discrepancies between cost (prices of past
     #  transactions, see adjust.for.schwab.corporate.actions) and value (prices today). Cash
@@ -472,6 +473,25 @@ refresh.alphavantage.prices <- function(
     First.Date=min(tx.for.symbol$Date),
     Last.Date=max(tx.for.symbol$Date),
     Quantity=round(sum(tx.for.symbol$Quantity), QTY_FRAC_DIGITS)))
+  
+  # Make sure that options positions don't "net out" with stock positions on the underlying by
+  #  quantity. We still want to download the prices for the stock in that case, and we don't care
+  #  about what quantity is other than whether it's non-zero.
+  tx.by.symbol$Cost <- abs(tx.by.symbol$Cost)
+  tx.by.symbol$Quantity <- abs(tx.by.symbol$Quantity)
+  # Even if we don't own shares of the underlying, we still want to download spot for options.
+  options.tx <- tx.by.symbol[is.options.symbol(tx.by.symbol$Symbol), ]
+  options.tx$Symbol <- sub("\\s+$", "", substr(options.tx$Symbol, 1, 6))
+  # TODO: figure out how to map index roots to AlphaVantage symbols.
+  tx.by.symbol <- rbind(tx.by.symbol[!is.options.symbol(tx.by.symbol$Symbol), ], options.tx)
+  # The first reduce finds where quantity netted out to zero within options and stocks individually.
+  #  Now we combine the gross quantities of the individual options and stocks.
+  tx.by.symbol <- reduce.on.factor(tx.by.symbol, "Symbol", function(tx.for.symbol) data.frame(
+    Cost=sum(tx.for.symbol$Cost),
+    First.Date=min(tx.for.symbol$First.Date),
+    Last.Date=max(tx.for.symbol$Last.Date),
+    Quantity=round(sum(tx.for.symbol$Quantity), QTY_FRAC_DIGITS)))
+  
   ordered.symbols <- tx.by.symbol$Symbol[order(tx.by.symbol$Cost, decreasing=TRUE)]
   ordered.symbols <- ordered.symbols[!is.options.symbol(ordered.symbols) & ordered.symbols != "$"]
   
@@ -494,7 +514,8 @@ refresh.alphavantage.prices <- function(
       now$mday <- now$mday - day.lag
       now <- as.POSIXct(now)
       
-      existing.price.dates <- as.Date(read.csv(file.name, stringsAsFactors=FALSE)$timestamp)
+      prices <- read.csv(file.name, stringsAsFactors=FALSE)
+      existing.price.dates <- if (is.null(prices$timestamp)) NULL else as.Date(prices$timestamp)
       if (length(existing.price.dates) > 0) {
         px.last.date <- max(existing.price.dates)
         px.first.date <- min(existing.price.dates)
@@ -522,7 +543,7 @@ refresh.alphavantage.prices <- function(
     prices <- read.csv(sprintf(
       "https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=%s&apikey=%s&outputsize=full&datatype=csv",
       symbol, alpha.vantage.key))
-    existing.price.dates <- as.Date(prices$timestamp)
+    existing.price.dates <- if (is.null(prices$timestamp)) NULL else as.Date(prices$timestamp)
     prices <- prices[existing.price.dates >= tx.first.date & existing.price.dates <= tx.last.date, ]
     write.csv(prices, file.name, row.names=FALSE)
     

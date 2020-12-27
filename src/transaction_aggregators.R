@@ -368,8 +368,23 @@ calc.portfolio.size.vs.time <- function(
 
 get.current.price <- function(
     tx, symbol, price.provider=recent.transaction.price.provider, date=Sys.Date()) {
+  if (!(symbol %in% tx$Symbol)) {
+    # Create a fake transaction table that will still allow calc.size.vs.time to go to other price
+    #  providers beside recent.transaction.price.provider.
+    tx <- tx[NULL, c("Date", "Symbol", "Quantity", "Cost", "Price", "Reference.Symbol")]
+    tx <- data.frame(
+      Date=c(as.Date("0000-01-01"), date),
+      Symbol=symbol,
+      Quantity=0,
+      Cost=NA,
+      Price=NA,
+      Reference.Symbol=symbol)
+  }
   size.vs.time <- calc.size.vs.time(tx, symbol, price.provider)
-  stepfun(size.vs.time$Date, c(NA, size.vs.time$Average.Price))(date)
+  if (all(is.na(size.vs.time$Average.Price)))
+    NA
+  else
+    stepfun(size.vs.time$Date, c(NA, size.vs.time$Average.Price))(date)
 }
 
 identify.tx.nearby <- function(tx, symbol, price.provider=recent.transaction.price.provider) {
