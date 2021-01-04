@@ -225,12 +225,14 @@ normalize.fidelity.option.expirations <- function(tx.part) {
   tx.part
 }
 
-load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
+load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRXX")) {
   security.actions <- data.frame(
     Action=c("YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED"),
     Sign=c(+1, +1, -1, -1))
+  distribution.actions <- c("DIVIDEND RECEIVED", "LONG-TERM CAP GAIN", "SHORT-TERM CAP GAIN")
   cash.actions <- c(
-    "DIVIDEND RECEIVED", "ROTH CONVERSION", "ROLLOVER", "JOURNALED JNL VS A/C TYPES")
+    distribution.actions, "ROTH CONVERSION", "ROLLOVER", "JOURNALED JNL VS A/C TYPES",
+    "TRANSFERRED FROM TO BROKERAGE OPTION", "TRANSFERRED TO OTHER PLAN OPTION")
   
   # Fidelity limits the date range in each file to one quarter, so we need to join the older files
   #  to the most recent files to get the full history.
@@ -273,8 +275,10 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
     #stopifnot(diff(tx.part$Date) <= 0)
     
     tx.part$Reference.Symbol <- ifelse(
-      grepl("^DIVIDEND RECEIVED", tx.part$Action), tx.part$Symbol, "")
-    tx.part$Reference.Symbol[tx.part$Reference.Symbol %in% cash.symbol] <- "$"
+      grepl(paste("^(", paste(distribution.actions, collapse="|"), ")", sep=""), tx.part$Action),
+      tx.part$Symbol,
+      "")
+    tx.part$Reference.Symbol[tx.part$Reference.Symbol %in% core.position] <- "$"
     
     stopifnot(all(tx.part$Symbol != "$"))
     tx.part <- normalize.fidelity.option.expirations(tx.part)
@@ -283,15 +287,17 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
       paste("^(", paste(cash.actions, collapse="|"), ")", sep=""),
       tx.part$Action[is.na(tx.part$Quantity)])))
     stopifnot(all(grepl(
-      paste("^(", paste(security.actions$Action[security.actions$Sign > 0], collapse="|"), ")", sep=""),
+      paste(
+        "^(", paste(security.actions$Action[security.actions$Sign > 0], collapse="|"), ")", sep=""),
       tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity > 0])))
     stopifnot(all(grepl(
-      paste("^(", paste(security.actions$Action[security.actions$Sign < 0], collapse="|"), ")", sep=""),
+      paste(
+        "^(", paste(security.actions$Action[security.actions$Sign < 0], collapse="|"), ")", sep=""),
       tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity < 0])))
-    stopifnot(all(tx.part$Symbol[startsWith(tx.part$Action, "REINVESTMENT")] %in% cash.symbol))
+    stopifnot(all(tx.part$Symbol[startsWith(tx.part$Action, "REINVESTMENT")] %in% core.position))
     tx.part <- normalize.cash.transactions(tx.part)
-    stopifnot(all(startsWith(tx.part$Action[tx.part$Symbol %in% cash.symbol], "REINVESTMENT")))
-    tx.part <- tx.part[!(tx.part$Symbol %in% cash.symbol), ]
+    stopifnot(all(startsWith(tx.part$Action[tx.part$Symbol %in% core.position], "REINVESTMENT")))
+    tx.part <- tx.part[!(tx.part$Symbol %in% core.position), ]
     tx.part <- adjust.for.fidelity.corporate.actions(tx.part)
     tx.part <- adjust.options.prices(tx.part)
     tx.part <- append.contra.tx(tx.part)
@@ -328,7 +334,7 @@ load.fidelity.transactions <- function(directory, cash.symbol="SPAXX") {
   tx
 }
 
-load.netbenefits.transactions <- function(directory) {
+load.netbenefits.transactions <- function(directory, brokeragelink.settle.lag=1) {
   tx <- read.csv(
     file.path(directory, "history.csv"), skip=5, stringsAsFactors=FALSE, check.names=FALSE,
     strip.white=TRUE)
@@ -342,8 +348,64 @@ load.netbenefits.transactions <- function(directory) {
   stopifnot(all(tx[tx$Action == "Transfer", c("Quantity", "Amount")] == 0))
   stopifnot(all(tx[tx$Action == "REALIZED G/L", c("Quantity")] == 0))
   
+  # Caller should also be calling load.fidelity.transactions on BrokerageLink history and
+  #  concatenating the result to this call's result. The BrokerageLink history will have the cash
+  #  transfer transactions as well, so remove BrokerageLink transfers here to avoid double counting.
+  # At the same time, we need to shift the cash outflow transaction in the NetBenefit's history from
+  #  the trade date to the settle date to avoid a dip in the portfolio cost since the BrokerageLink
+  #  history won't see the cash inflow from the transfer until the settle date.
+  stopifnot(all(tx$Symbol != "$"))
+  tx$Row.Order <- seq_len(nrow(tx))
+  brokeragelinks <- tx[tx$Symbol == "BROKERAGELINK", ]
+  if (nrow(brokeragelinks) != 0) {
+    last.brokeragelink.row <- 0
+    new.tx <- NULL
+    for (i in seq_len(nrow(brokeragelinks))) {
+      # Remove the BrokerageLink transaction.
+      if (brokeragelinks$Row.Order[i] != 1) {
+        new.tx <- rbind(
+          new.tx, tx[(last.brokeragelink.row + 1):(brokeragelinks$Row.Order[i] - 1), ])
+      }
+      last.brokeragelink.row <- brokeragelinks$Row.Order[i]
+      # BrokerageLink inflows settle in T+1 but BrokerageLink outflows settle in T+0.
+      if (brokeragelink.settle.lag == 0 || brokeragelinks$Amount[i] < 0) {
+        next
+      }
+      
+      # Cancel out the cash contra transaction to the BrokerageLink transaction on the trade date.
+      for.trade.date <- brokeragelinks[i, ]
+      for.trade.date$Symbol <- "$"
+      for.trade.date$Quantity <- for.trade.date$Amount
+      for.trade.date$Price <- 1
+      
+      # TODO: insert this row with transactions for settle.date rather than for trade.date.
+      settle.date <- for.trade.date$Date
+      for (j in seq_len(brokeragelink.settle.lag)) {
+        settle.date <- settle.date + 1
+        while (!isBizday(as.timeDate(settle.date), holidayNYSE())) {
+          settle.date <- settle.date + 1
+        }
+      }
+      
+      # Restore the cash contra transaction, but on the settle date instead of the trade date.
+      for.settle.date <- brokeragelinks[i, ]
+      for.settle.date$Date <- settle.date
+      for.settle.date$Symbol <- "$"
+      for.settle.date$Amount <- -for.settle.date$Amount
+      for.settle.date$Quantity <- for.settle.date$Amount
+      for.settle.date$Price <- 1
+      
+      new.tx <- rbind(new.tx, for.settle.date, for.trade.date)
+    }
+    if (last.brokeragelink.row != nrow(tx)) {
+      new.tx <- rbind(new.tx, tx[(last.brokeragelink.row + 1):nrow(tx), ])
+    }
+    tx <- new.tx
+  }
+  
   symbol.mapping <- read.csv(file.path(directory, "symbol_mapping.csv"), stringsAsFactors=FALSE)
-  tx$Symbol <- symbol.mapping$Symbol[match(tx$Symbol, symbol.mapping$Investment)]
+  tx$Symbol <- ifelse(
+    tx$Symbol == "$", "$", symbol.mapping$Symbol[match(tx$Symbol, symbol.mapping$Investment)])
   tx$Reference.Symbol <- ""
   
   # Dividends are immediately reinvested, so the value of a holding stays the same but its cost
