@@ -11,6 +11,11 @@ is.options.symbol <- function(symbol) {
   regexpr("^[\\w ]{6}\\d{6}[CP]\\d{8}$", symbol, perl=TRUE) != -1
 }
 
+is.mutual.fund.symbol <- function(symbol) {
+  # See Nasdaq fifth-letter codes.
+  nchar(symbol) == 5 & substr(symbol, 5, 5) == "X"
+}
+
 adjust.options.prices <- function(prices.for.symbols, contract.multiplier=100) {
   # Price can only be 0 for options expiration transactions. Expiration has no commissions.
   is.opt <- is.options.symbol(prices.for.symbols$Symbol) & prices.for.symbols$Price != 0
@@ -42,8 +47,12 @@ adjust.for.schwab.corporate.actions <- function(tx) {
   }
   tx <- tx[tx$Action != "Reverse Split", ]
   
-  # Expired options are worthless.
-  is.expired <- tx$Action %in% c("Expired", "Assigned")
+  # Expired options are worthless. Journal transactions have no price so assign them zero to ensure
+  #  that they're treated as costless.
+  # We have to be careful and make sure to only use tx in recent.transaction.price.provider after
+  #  washing out journals with their contra ones through coalesce.tx.by.date.symbol.price because,
+  #  unlike in the case of expiration or assignment, the option is not truly worth 0.
+  is.expired <- tx$Action %in% c("Expired", "Assigned") | tx$Action == "Journal" & tx$Symbol != "$"
   stopifnot(all(is.na(tx[is.expired, c("Price", "Amount")])))
   stopifnot(all(tx[is.expired, "Fees & Comm"] == 0))
   stopifnot(all(tx[tx$Action == "Expired", "Quantity"] < 0))
@@ -122,14 +131,13 @@ load.schwab.transactions <- function(export.file) {
     Action=c(
       "Buy", "Buy to Open", "Buy to Close",
       "Sell", "Sell to Open", "Sell to Close", "Sell Short",
-      "Reverse Split", "Expired", "Assigned"),
+      "Reverse Split", "Expired", "Assigned", "Journal"),
     Sign=c(
       +1, +1, +1,
       -1, -1, -1, -1,
-      +1, +1, +1))
+      +1, +1, +1, +1))
   cash.actions <- c(
-    "Journal", "MoneyLink Transfer",
-    "Bank Interest", "Cash Dividend", "Pr Yr Cash Div", "Service Fee")
+    "MoneyLink Transfer", "Bank Interest", "Cash Dividend", "Pr Yr Cash Div", "Service Fee")
   
   tx <- read.csv(export.file, skip=1, stringsAsFactors=FALSE, check.names=FALSE)
   stopifnot(tail(tx$Date, 1) == "Transactions Total")
@@ -164,7 +172,12 @@ load.schwab.transactions <- function(export.file) {
   
   stopifnot(all(!is.na(tx$Date)))
   stopifnot(all(tx$Symbol != "$"))
-  stopifnot(all(tx$Action %in% cash.actions == is.na(tx$Quantity)))
+  # Journal can either represent a cash transfer from another Schwab account or a change in options
+  #  pairing for margin requirement purposes, e.g. from cash secured put and long put to put spread.
+  #  In the former case, Quantity and Symbol are empty. In the latter case, treat Journal the same
+  #  way as Expired or Assigned since it has a Quantity and Symbol but no Price or Amount.
+  stopifnot(all(
+    (tx$Action %in% cash.actions | tx$Action == "Journal" & tx$Symbol == "") == is.na(tx$Quantity)))
   stopifnot(all(!is.na(tx$Symbol) & tx$Symbol != "" | is.na(tx$Quantity)))
   tx <- normalize.cash.transactions(tx)
   tx <- adjust.for.schwab.corporate.actions(tx)
@@ -225,6 +238,7 @@ normalize.fidelity.option.expirations <- function(tx.part) {
   tx.part
 }
 
+# TODO: treat any money market mutual fund (five character symbol, ends with XX) as core position?
 load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRXX")) {
   security.actions <- data.frame(
     Action=c("YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED"),
@@ -303,11 +317,16 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
     tx.part <- append.contra.tx(tx.part)
     # Make sure Quantity, Price, Fees & Comm, and Amount are consistent before removing Fees & Comm
     #  and Amount information.
-    # Fidelity rounds unit prices to 2 decimal places even though it calculates the transaction
-    #  amount using the unit price up to 4 decimal places.
     tx.part$Amount[tx.part$Symbol != "$"] <- -tx.part$Amount[tx.part$Symbol != "$"]
+    # For transactions with integer quantities, Fidelity rounds unit prices to 2 decimal places even
+    #  though it calculates the transaction amount using the unit price up to 4 decimal places.
+    whole.qty.tx.part <- tx.part[!is.mutual.fund.symbol(tx.part$Symbol) | tx.part$Symbol == "$", ]
     stopifnot(
-      max(abs(tx.part$Price - (tx.part$Amount - tx.part$`Fees & Comm`) / tx.part$Quantity)) < 0.01)
+      max(abs(whole.qty.tx.part$Price - (whole.qty.tx.part$Amount - whole.qty.tx.part$`Fees & Comm`) / whole.qty.tx.part$Quantity), -Inf) < 0.01)
+    # For transactions that specify three decimal places of precision in quantities, verify that
+    #  Price * (Quantity + 0.001) exceeds (Amount - Fees & Comm).
+    frac.qty.tx.part <- tx.part[is.mutual.fund.symbol(tx.part$Symbol) & tx.part$Symbol != "$", ]
+    stopifnot(min(frac.qty.tx.part$Price - (frac.qty.tx.part$Amount - frac.qty.tx.part$`Fees & Comm`) / (frac.qty.tx.part$Quantity + 0.001), Inf) >= 0)
     tx.part <- tx.part[, c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
     
     # Make tx.part and tx disjoint.
