@@ -193,15 +193,35 @@ group.options.and.total.in.portfolio.size.snapshot <- function(agg.by.symbol, mi
     agg.all <- rbind(
       agg.all, aggregate.on.portfolio("Miscellaneous", agg.all[agg.all$Symbol %in% misc.symbols, ]))
   }
-  agg.all <- rbind(agg.all, aggregate.on.portfolio("Portfolio", agg.all))
+  # The calling function wants both the aggregate miscellaneous size as well as the breakdown, so
+  #  both are present in agg.all. Make sure we don't double count miscellaneous symbols in the
+  #  portfolio aggregate though.
+  agg.all <- rbind(
+    agg.all, aggregate.on.portfolio("Portfolio", agg.all[agg.all$Symbol != "Miscellaneous", ]))
   agg.all
 }
 
 calc.portfolio.size.snapshot.with.day.over.day.gain <- function(
     tx, price.provider=recent.transaction.price.provider) {
-  agg.all <- calc.portfolio.size.snapshot(tx, price.provider)
-  if (any(tx$Date <= max(tx$Date) - 1)) {
-    agg.all.yday <- calc.portfolio.size.snapshot(tx, price.provider, max(tx$Date) - 1)
+  # Get the latest date for which we have a price available. Do not solely rely on max(tx$Date)
+  #  since it's possible we haven't made any transactions in a long time.
+  date <- max(
+    do.call(
+      c,
+      lapply(
+        unique(tx$Symbol),
+        function(symbol) max(price.provider$available.dates(symbol), as.Date("0001-01-01"))
+      )
+    )
+  )
+  # We still need to account for max(tx$Date) though since Fidelity adds T + 1 transfers into
+  #  BrokerageLink to the history on T, so max(tx$Date) can potentially be in the future in which
+  #  case we want to make sure we include the transactions on that date when snapping our positions.
+  #  Today's price will just be carried forward into the future date by get.current.price.
+  agg.all <- calc.portfolio.size.snapshot(tx, price.provider, max(tx$Date, date))
+  if (any(tx$Date <= date - 1)) {
+    # If the latest price date is a Monday, get.current.price will carry forward Friday to Sunday.
+    agg.all.yday <- calc.portfolio.size.snapshot(tx, price.provider, date - 1)
   } else {
     agg.all.yday <- data.frame(matrix(ncol=1, nrow=0, dimnames=list(NULL, c("Symbol"))))
   }
