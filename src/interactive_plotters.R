@@ -18,7 +18,7 @@ get.portfolio.summary.table <- function(
   open.options.by.root <- split(
     formatted.tx.options$Symbol[formatted.tx.options$Quantity != 0],
     options.roots[formatted.tx.options$Quantity != 0])
-  # Then, grab the most recently transacted options until we have at least 6 per root.
+  # Then, grab the most recently transacted options until we have at least 8 per root.
   closed.options.by.root <- lapply(
     split(
       formatted.tx.options$Symbol[formatted.tx.options$Quantity == 0],
@@ -29,7 +29,7 @@ get.portfolio.summary.table <- function(
         data.frame(Symbol=for.symbol$Symbol[1], Date=max(for.symbol$Date), stringsAsFactors=FALSE)
       }))
       recent.dates <- head(
-        sort(for.root$Date, partial=seq_len(min(6, nrow(for.root))), decreasing=TRUE), 6)
+        sort(for.root$Date, partial=seq_len(min(8, nrow(for.root))), decreasing=TRUE), 8)
       for.root <- for.root[for.root$Date %in% recent.dates, ]
       for.root$Symbol[order(for.root$Date, decreasing=TRUE)]
     })
@@ -37,21 +37,32 @@ get.portfolio.summary.table <- function(
   include.options <- do.call(
     c,
     Map(function(open.for.root, closed.for.root) {
-      c(open.for.root, head(closed.for.root, 6 - min(length(open.for.root), 6)))
+      c(open.for.root, head(closed.for.root, 8 - min(length(open.for.root), 8)))
     }, open.options.by.root[options.roots], closed.options.by.root[options.roots]))
   formatted.tx.options <- formatted.tx.options[formatted.tx.options$Symbol %in% include.options, ]
   formatted.tx.options <- formatted.tx.options[order(formatted.tx.options$Symbol), ]
   
   formatted.tx <- cbind(
-    ` `=ifelse(formatted.tx$Symbol %in% c("Portfolio", "$"), "", "&#x25b9;"), formatted.tx)
-  formatted.tx <- rbind(formatted.tx, cbind(` `="&#x25b9;", formatted.tx.options))
+    ` `=ifelse(formatted.tx$Symbol %in% c("Portfolio"), "", "&#x25b9;"), formatted.tx)
+  formatted.tx <- rbind(
+    formatted.tx, cbind(` `=rep("&#x25b9;", nrow(formatted.tx.options)), formatted.tx.options))
   # Populate disclosure widgets with recent transaction history for every stock and individual
   #  option symbol.
   real.symbols <- formatted.tx$Symbol[
     formatted.tx$` ` != "" & !grepl(" options$|^Miscellaneous$", formatted.tx$Symbol)]
   symbol.details <- setNames(lapply(real.symbols, function(symbol) {
+    # Include dividend and interest transactions, but not fees, cash contra transactions, deposits,
+    #  and withdrawals.
+    # TODO: support deposits and withdrawals. Either add a new column to the transaction table for
+    #  identifying cash contra transactions, or group transactions by date and subtract non-cash
+    #  costs with no reference symbol from cash costs with no reference symbol to get day's net
+    #  inflow.
     for.symbol <- tx[
-      tx$Symbol == symbol & tx$Reference.Symbol == "", c("Date", "Price", "Quantity")]
+      tx$Symbol == symbol & (
+        if (symbol == "$") (tx$Reference.Symbol == "$" & tx$Cost < 0)
+        else (tx$Reference.Symbol == "" | tx$Cost < 0)
+      ),
+      c("Date", "Price", "Quantity", "Cost")]
     recent.dates <- head(
       sort(for.symbol$Date, partial=seq_len(min(10, nrow(for.symbol))), decreasing=TRUE), 10)
     for.symbol <- for.symbol[for.symbol$Date %in% recent.dates, ]
@@ -73,6 +84,8 @@ get.portfolio.summary.table <- function(
     })), colnames(for.symbol))
     for.symbol$Price <- sprintf(
       "%s\\$%0.4f", ifelse(for.symbol$Price >= 0, "", "-"), abs(for.symbol$Price))
+    for.symbol$Cost <- sprintf(
+      "%s\\$%0.2f", ifelse(for.symbol$Cost >= 0, "", "-"), abs(for.symbol$Cost))
     gsub("\n", "", renderTags(
       do.call(
         tags$table,
@@ -156,6 +169,7 @@ get.portfolio.summary.table <- function(
           'odd even').addClass('child');
         miscRows.remove().draw();
         
+        // TODO: close children and grandchildren before DataTables search or sort.
         table.on('click', 'td.details-control', function() {
           // Use DataTables's native child rows functionality for expanding options and misc.
           var td = $(this), tr = td.closest('tr'); row = table.row(tr);
@@ -409,7 +423,8 @@ get.interactive.size.vs.price.plot <- function(
         name=series$name,
         custom=series$price,
         data=data.frame(
-          x=rep(series$pct.drawdown, 3),
+          x=series$pct.drawdown,
+          # Place the marker at the cumulative cost for the unit cost or value.
           y=c(interp.cum.cost.at.price(series$pct.drawdown), range(data$y))),
         dashStyle="Dash",
         tooltip=list(
@@ -444,11 +459,15 @@ get.interactive.size.vs.time.plot <- function(
         events=list(
           legendItemClick=JS("
             function() {
-              if (this.name == 'Show all' || this.name == 'Hide all') {
-                this.chart.series.forEach(
-                  series => this.chart.showHideFlag ? series.hide() : series.show());
-                this.chart.showHideFlag = !this.chart.showHideFlag;
-                this.chart.series[this.index].update({name: this.chart.showHideFlag ? 'Hide all' : 'Show all'})
+              var thisName = this.name;
+              if (thisName == 'Show all' || thisName == 'Hide all') {
+                var thisVisible = this.visible;
+                this.chart.series.filter(function(series) {
+                  return series.name != thisName;
+                }).forEach(function(series) {
+                  if (thisVisible) series.hide(); else series.show();
+                });
+                this.chart.series[this.index].update({name: thisVisible ? 'Show all' : 'Hide all'});
               }
             }")
         )
@@ -465,6 +484,7 @@ get.interactive.size.vs.time.plot <- function(
     hc_yAxis_multiples(
       list(title=list(text="Position Size")), list(title=list(text="Gain"), opposite=TRUE))
   
+  # Dummy series with no data just for the sake of a legend entry with special handling.
   hc <- hc %>%
     hc_add_series(
       name="Show all",
@@ -560,6 +580,7 @@ get.interactive.option.payoff.plot <- function(
   
   tx <- calc.portfolio.size.snapshot(tx, price.provider)
   tx <- tx[tx$Quantity != 0, c("Symbol", "Quantity", "Cost", "Value")]
+  # Each option has a 100x contract multiplier.
   claim.type.mapping <- data.frame(Letter=c("C", "P"), Slope=c(+100, -100), stringsAsFactors=FALSE)
   tx$Expiry <- as.Date(
     paste(
@@ -711,7 +732,7 @@ get.interactive.option.payoff.plot <- function(
         id=expiry,
         data=setNames(for.expiry, c("x", "y")),
         tooltip=list(
-          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Expiration value: <b>${point.y:0.4f}</b><br/>"),
+          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Expiration value ($): <b>{point.y:0.4f}</b><br/>"),
         marker=list(symbol="diamond", radius=2),
         color=colors$blue)
     hc <- hc %>%
@@ -720,7 +741,7 @@ get.interactive.option.payoff.plot <- function(
         data=data.frame(x=for.expiry$Realized.Spot, y=unname(current.sizes["Value"])),
         dashStyle="Dash",
         tooltip=list(
-          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Current value: <b>${point.y:0.4f}</b><br/>"),
+          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Current value ($): <b>{point.y:0.4f}</b><br/>"),
         marker=list(symbol="diamond", radius=2, enabled=FALSE),
         color=colors$green,
         linkedTo=expiry,
@@ -731,7 +752,7 @@ get.interactive.option.payoff.plot <- function(
         data=data.frame(x=for.expiry$Realized.Spot, y=unname(current.sizes["Cost"])),
         dashStyle="Dash",
         tooltip=list(
-          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Current cost: <b>${point.y:0.4f}</b><br/>"),
+          pointFormat="<span style=\"color:{point.color}\">\u25CF</span> Current cost ($): <b>{point.y:0.4f}</b><br/>"),
         marker=list(symbol="diamond", radius=2, enabled=FALSE),
         color=colors$red,
         linkedTo=expiry,
@@ -856,7 +877,7 @@ plot.interactive <- function(
     interesting.options, 1, nchar(interesting.options) - nchar(" options"))
   interesting.options <- setNames(
     lapply(interesting.options, function(options.root) unique(tx$Symbol[
-      nchar(tx$Symbol) == 21 & sub("\\s+$", "", substr(tx$Symbol, 1, 6)) == options.root])),
+      is.options.symbol(tx$Symbol) & sub("\\s+$", "", substr(tx$Symbol, 1, 6)) == options.root])),
     interesting.options)
   
   for (options.root in names(interesting.options)) {
