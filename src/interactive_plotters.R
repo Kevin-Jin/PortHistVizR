@@ -5,43 +5,16 @@ colors <- list(
   yellow="#E4D354"
 )
 
-get.portfolio.summary.table <- function(
-    tx, misc.symbols, price.provider=recent.transaction.price.provider) {
-  formatted.tx.all <- calc.portfolio.size.snapshot.with.day.over.day.gain(tx, price.provider)
-  # For now, always treat options as interesting symbols.
-  misc.symbols <- misc.symbols[!grepl(" options$", misc.symbols)]
-  formatted.tx <- group.options.and.total.in.portfolio.size.snapshot(formatted.tx.all, misc.symbols)
+get.portfolio.summary.table <- function(agg.tx.tables) {
+  formatted.tx <- agg.tx.tables$portfolio.size.snapshot
+  misc.symbols <- agg.tx.tables$miscellaneous.symbols
+  misc.symbols <- misc.symbols[!is.options.symbol(misc.symbols)]
   
-  formatted.tx.options <- formatted.tx.all[is.options.symbol(formatted.tx.all$Symbol), ]
-  options.roots <- sub("\\s+$", "", substr(formatted.tx.options$Symbol, 1, 6))
-  # First, grab all options positions that are currently open.
-  open.options.by.root <- split(
-    formatted.tx.options$Symbol[formatted.tx.options$Quantity != 0],
-    options.roots[formatted.tx.options$Quantity != 0])
-  # Then, grab the most recently transacted options until we have at least 8 per root.
-  closed.options.by.root <- lapply(
-    split(
-      formatted.tx.options$Symbol[formatted.tx.options$Quantity == 0],
-      options.roots[formatted.tx.options$Quantity == 0]
-    ), function(for.root) {
-      for.root <- unique(tx[tx$Symbol %in% for.root, c("Symbol", "Date")])
-      for.root <- do.call(rbind, lapply(split(for.root, for.root$Symbol), function(for.symbol) {
-        data.frame(Symbol=for.symbol$Symbol[1], Date=max(for.symbol$Date), stringsAsFactors=FALSE)
-      }))
-      recent.dates <- head(
-        sort(for.root$Date, partial=seq_len(min(8, nrow(for.root))), decreasing=TRUE), 8)
-      for.root <- for.root[for.root$Date %in% recent.dates, ]
-      for.root$Symbol[order(for.root$Date, decreasing=TRUE)]
-    })
-  options.roots <- unique(options.roots)
-  include.options <- do.call(
-    c,
-    Map(function(open.for.root, closed.for.root) {
-      c(open.for.root, head(closed.for.root, 8 - min(length(open.for.root), 8)))
-    }, open.options.by.root[options.roots], closed.options.by.root[options.roots]))
-  formatted.tx.options <- formatted.tx.options[formatted.tx.options$Symbol %in% include.options, ]
+  recent.options <- agg.tx.tables$recent.options
+  formatted.tx.options <- formatted.tx[formatted.tx$Symbol %in% recent.options, ]
   formatted.tx.options <- formatted.tx.options[order(formatted.tx.options$Symbol), ]
   
+  formatted.tx <- formatted.tx[!is.options.symbol(formatted.tx$Symbol), ]
   formatted.tx <- cbind(
     ` `=ifelse(formatted.tx$Symbol %in% c("Portfolio"), "", "&#x25b9;"), formatted.tx)
   formatted.tx <- rbind(
@@ -51,29 +24,7 @@ get.portfolio.summary.table <- function(
   real.symbols <- formatted.tx$Symbol[
     formatted.tx$` ` != "" & !grepl(" options$|^Miscellaneous$", formatted.tx$Symbol)]
   symbol.details <- setNames(lapply(real.symbols, function(symbol) {
-    # Include dividend and interest transactions, but not fees, cash contra transactions, deposits,
-    #  and withdrawals.
-    # TODO: support deposits and withdrawals. Either add a new column to the transaction table for
-    #  identifying cash contra transactions, or group transactions by date and subtract non-cash
-    #  costs with no reference symbol from cash costs with no reference symbol to get day's net
-    #  inflow.
-    for.symbol <- tx[
-      tx$Symbol == symbol & (
-        if (symbol == "$") (tx$Reference.Symbol == "$" & tx$Cost < 0)
-        else (tx$Reference.Symbol == "" | tx$Cost < 0)
-      ),
-      c("Date", "Price", "Quantity", "Cost")]
-    recent.dates <- head(
-      sort(for.symbol$Date, partial=seq_len(min(10, nrow(for.symbol))), decreasing=TRUE), 10)
-    for.symbol <- for.symbol[for.symbol$Date %in% recent.dates, ]
-    # Preserve intraday transaction order if Date is already sorted ascending or descending.
-    if (!is.unsorted(for.symbol$Date) && min(for.symbol$Date) != max(for.symbol$Date)) {
-      # Sorted in ascending order. Flip it around.
-      for.symbol <- for.symbol[rev(seq_len(nrow(for.symbol))), ]
-    } else if (is.unsorted(rev(for.symbol$Date))) {
-      # Neither sorted in ascending nor descending order. Order it ourselves.
-      for.symbol <- for.symbol[order(for.symbol$Date, for.symbol$Price, decreasing=TRUE), ]
-    }
+    for.symbol <- agg.tx.tables$recent.transactions[[symbol]]
     
     if (is.options.symbol(symbol)) {
       # Undo the 100x contract multiplier on options unit costs to get the quoted price.
@@ -248,10 +199,9 @@ get.portfolio.summary.table <- function(
   portfolio.summary
 }
 
-get.interactive.price.vs.time.plot <- function(
-    tx, symbol, price.provider=recent.transaction.price.provider, arearange=FALSE,
+get.interactive.price.vs.time.plot <- function(agg.tx.tables, symbol, arearange=FALSE,
     pct.drawdown.major=TRUE) {
-  tx <- calc.price.vs.time(tx, symbol)
+  tx <- agg.tx.tables$price.vs.time.tables[[symbol]]
   
   tx$purchase.prices$Average.Pct.Drawdown <- 100 * (1 - tx$purchase.prices$Average / tx$peak.price)
   tx$purchase.prices$Low.Pct.Drawdown <- 100 * (1 - tx$purchase.prices$Low / tx$peak.price)
@@ -310,10 +260,10 @@ get.interactive.price.vs.time.plot <- function(
       point.data <- data.frame(
         x=datetime_to_timestamp(series$data$Date), Price=series$data$Average,
         PctDrawdown=series$data$Average.Pct.Drawdown)
-      date.bound <- max(as.Date("0001-01-01"), price.provider$available.dates(symbol))
-      if (!(date.bound %in% series$data$Date) && date.bound >= min(series$data$Date)) {
+      upper.date.bound <- agg.tx.tables$current.dates.by.symbol[[symbol]]
+      if (!(upper.date.bound %in% series$data$Date) && upper.date.bound >= min(series$data$Date)) {
         point.data <- rbind(point.data, data.frame(
-          x=datetime_to_timestamp(date.bound), Price=NA, PctDrawdown=NA))
+          x=datetime_to_timestamp(upper.date.bound), Price=NA, PctDrawdown=NA))
       }
       
       colnames(range.data)[match(
@@ -335,20 +285,19 @@ get.interactive.price.vs.time.plot <- function(
   hc
 }
 
-get.interactive.size.vs.price.plot <- function(
-    tx, symbol, price.provider=recent.transaction.price.provider, tick.size=0.01) {
+get.interactive.size.vs.price.plot <- function(agg.tx.tables, symbol, tick.size=0.01) {
   # TODO: pct.drawdown.major == FALSE case.
   # TODO: cum.quantity.major == TRUE case. Optimal cumulative quantity vs. % drawdown function is
   #  symmetric, whereas optimal cumulative cost vs. % drawdown function is skewed such that lower
   #  prices have lower optimal cumulative costs due to the fact that quantity times price is lower.
-  size.vs.price <- calc.size.vs.price(tx, symbol, 0, FALSE)[, c(
-    "Pct.Drawdown", "Cost", "Cum.Cost", "Quantity")]
+  size.vs.price <- agg.tx.tables$size.vs.price.tables[[symbol]]
+  size.vs.price <- size.vs.price[, c("Pct.Drawdown", "Cost", "Cum.Cost", "Quantity")]
   size.vs.price <- size.vs.price[size.vs.price$Quantity != 0, ]
   size.vs.price$Price <- size.vs.price$Cost / size.vs.price$Quantity
   peak.price <- sum(size.vs.price$Price) / sum(1 - size.vs.price$Pct.Drawdown / 100)
-  unit.value <- get.current.price(tx, symbol, price.provider)
+  unit.value <- agg.tx.tables$unit.values[[symbol]]
   current.pct.drawdown <- 100 * (1 - unit.value / peak.price)
-  unit.cost <- sum(tx$Cost[tx$Symbol == symbol]) / sum(tx$Quantity[tx$Symbol == symbol])
+  unit.cost <- agg.tx.tables$unit.costs[[symbol]]
   average.pct.drawdown <- 100 * (1 - unit.cost / peak.price)
   
   size.vs.price$Raw.Price <- size.vs.price$Price
@@ -437,19 +386,12 @@ get.interactive.size.vs.price.plot <- function(
 }
 
 get.interactive.size.vs.time.plot <- function(
-    tx, symbol, price.provider=recent.transaction.price.provider, name=symbol, arearange=FALSE,
-    hide.initially=TRUE) {
+    agg.tx.tables, symbol, arearange=FALSE, hide.initially=TRUE) {
   # Size vs. time plots are the densest charts since they plot an observation per business day
   #  rather than an observation per transaction.
   # All series are hidden initially to cut down on browser rendering time on page load.
   # Users are expected to manually toggle the size vs. time plots they're interested in.
-  if (length(symbol) == 1) {
-    costs <- calc.size.vs.time(tx, symbol, price.provider)
-  } else if (length(symbol) == 0) {
-    costs <- data.frame(Date=as.Date(character()))
-  } else {
-    costs <- calc.portfolio.size.vs.time(tx, symbol, price.provider)
-  }
+  costs <- agg.tx.tables$size.vs.time.tables[[symbol]]
   costs$Gain <- costs$Value - costs$Cost
   costs$Cum.Quantity <- round(cumsum(costs$Quantity), QTY_FRAC_DIGITS)
   
@@ -478,7 +420,7 @@ get.interactive.size.vs.time.plot <- function(
       zoomType="xy",
       events=list(load=JS("function() { this.showHideFlag = false; }"))
     ) %>%
-    hc_title(text=paste(name, "Size vs. Time")) %>%
+    hc_title(text=paste(symbol, "Size vs. Time")) %>%
     hc_tooltip(shared=TRUE, valueDecimals=2, borderColor=colors$blue) %>%
     hc_xAxis(title=list(text="Date"), type="datetime", gridLineWidth=1) %>%
     hc_yAxis_multiples(
@@ -572,27 +514,26 @@ get.interactive.size.vs.time.plot <- function(
   hc
 }
 
-get.interactive.option.payoff.plot <- function(
-    tx, options.for.root, options.root, price.provider=recent.transaction.price.provider) {
-  current.spot <- get.current.price(tx, options.root, price.provider)
-  reference.date <- max(tx$Date)
-  tx <- tx[tx$Symbol %in% options.for.root, ]
+get.interactive.option.payoff.plot <- function(agg.tx.tables, options.for.root, options.root) {
+  current.spot <- agg.tx.tables$unit.values[[options.root]]
+  current.date <- agg.tx.tables$current.date
   
-  tx <- calc.portfolio.size.snapshot(tx, price.provider)
+  tx <- agg.tx.tables$portfolio.size.snapshot
+  tx <- tx[tx$Symbol %in% options.for.root, ]
   tx <- tx[tx$Quantity != 0, c("Symbol", "Quantity", "Cost", "Value")]
   # Each option has a 100x contract multiplier.
   claim.type.mapping <- data.frame(Letter=c("C", "P"), Slope=c(+100, -100), stringsAsFactors=FALSE)
   tx$Expiry <- as.Date(
     paste(
-      rep(as.character(as.POSIXlt(reference.date)$year %/% 100 + 19), nrow(tx)),
+      rep(as.character(as.POSIXlt(current.date)$year %/% 100 + 19), nrow(tx)),
       substr(tx$Symbol, 7, 12),
       sep=""),
     "%Y%m%d")
   # Some Y2100 future proofing.
-  tx$Expiry[tx$Expiry < reference.date] <- do.call(
+  tx$Expiry[tx$Expiry < current.date] <- do.call(
     c,
     lapply(
-      tx$Expiry[tx$Expiry < reference.date],
+      tx$Expiry[tx$Expiry < current.date],
       function(expiry) seq(expiry, by="100 years", length.out=2)[2]))
   tx$Itm.Unit.Slope <- claim.type.mapping$Slope[
     match(substr(tx$Symbol, 13, 13), claim.type.mapping$Letter)]
@@ -844,12 +785,11 @@ set.full.page.sizing.policy <- function(widget) {
   widget
 }
 
-get.interactive.plots.for.symbol <- function(
-    tx, symbol, price.provider=recent.transaction.price.provider) {
+get.interactive.plots.for.symbol <- function(agg.tx.tables, symbol) {
   symbol.plot <- combineWidgets(
-    get.interactive.price.vs.time.plot(tx, symbol, price.provider),
-    get.interactive.size.vs.price.plot(tx, symbol, price.provider),
-    get.interactive.size.vs.time.plot(tx, symbol, price.provider))
+    get.interactive.price.vs.time.plot(agg.tx.tables, symbol),
+    get.interactive.size.vs.price.plot(agg.tx.tables, symbol),
+    get.interactive.size.vs.time.plot(agg.tx.tables, symbol))
   
   symbol.plot <- set.full.page.sizing.policy(symbol.plot)
   symbol.plot$elementId <- paste(symbol, "plots", sep="-")
@@ -857,74 +797,44 @@ get.interactive.plots.for.symbol <- function(
   symbol.plot
 }
 
-plot.interactive.for.symbol <- function(
-    tx, symbol, price.provider=recent.transaction.price.provider) {
-  symbol.plot <- get.interactive.plots.for.symbol(tx, symbol, price.provider)
-  print(symbol.plot)
-}
-
-plot.interactive <- function(
-    tx, interesting.symbols, price.provider=recent.transaction.price.provider,
-    output.path=file.path("output", "PortViz.html")) {
-  is.interesting.option <- grepl(" options$", interesting.symbols)
-  interesting.stocks <- interesting.symbols[!is.interesting.option]
+plot.interactive <- function(agg.tx.tables, output.path=file.path("output", "PortViz.html")) {
+  symbol.plots <- lapply(agg.tx.tables$interesting.stocks, function(symbol)
+    get.interactive.plots.for.symbol(agg.tx.tables, symbol))
   
-  symbol.plots <- lapply(interesting.stocks, function(symbol)
-    get.interactive.plots.for.symbol(tx, symbol, price.provider))
-  
-  interesting.options <- interesting.symbols[is.interesting.option]
-  interesting.options <- substr(
-    interesting.options, 1, nchar(interesting.options) - nchar(" options"))
-  interesting.options <- setNames(
-    lapply(interesting.options, function(options.root) unique(tx$Symbol[
-      is.options.symbol(tx$Symbol) & sub("\\s+$", "", substr(tx$Symbol, 1, 6)) == options.root])),
-    interesting.options)
-  
-  for (options.root in names(interesting.options)) {
-    options.for.root <- interesting.options[[options.root]]
-    calls.for.root <- options.for.root[substr(options.for.root, 13, 13) == "C"]
-    puts.for.root <- options.for.root[substr(options.for.root, 13, 13) == "P"]
+  for (options.root in names(agg.tx.tables$interesting.options)) {
+    options.for.root <- agg.tx.tables$interesting.options[[options.root]]
     
     options.plot <- combineWidgets(
-      get.interactive.size.vs.time.plot(
-        tx, calls.for.root, price.provider, paste(options.root, "calls")),
-      get.interactive.size.vs.time.plot(
-        tx, options.for.root, price.provider, paste(options.root, "options")),
-      get.interactive.size.vs.time.plot(
-        tx, puts.for.root, price.provider, paste(options.root, "puts")),
-      get.interactive.option.payoff.plot(tx, options.for.root, options.root, price.provider))
+      get.interactive.size.vs.time.plot(agg.tx.tables, paste(options.root, "calls")),
+      get.interactive.size.vs.time.plot(agg.tx.tables, paste(options.root, "options")),
+      get.interactive.size.vs.time.plot(agg.tx.tables, paste(options.root, "puts")),
+      get.interactive.option.payoff.plot(agg.tx.tables, options.for.root, options.root))
     
     options.plot <- set.full.page.sizing.policy(options.plot)
     options.plot$elementId <- paste(options.root, "options-plots", sep="-")
     symbol.plots <- c(symbol.plots, list(options.plot))
   }
   
-  interesting.symbols <- c("$", interesting.stocks, do.call(c, interesting.options))
-  miscellaneous.symbols <- unique(tx$Symbol[!(tx$Symbol %in% interesting.symbols)])
-  if (length(miscellaneous.symbols) > 0) {
-    miscellaneous.plot <- get.interactive.size.vs.time.plot(
-      tx, miscellaneous.symbols, price.provider, "Miscellaneous")
+  if (length(agg.tx.tables$miscellaneous.symbols) > 0) {
+    miscellaneous.plot <- get.interactive.size.vs.time.plot(agg.tx.tables, "Miscellaneous")
     miscellaneous.plot <- set.full.page.sizing.policy(miscellaneous.plot)
     miscellaneous.plot$elementId <- "miscellaneous-plot"
     symbol.plots <- c(symbol.plots, list(miscellaneous.plot))
   }
   
-  if ("$" %in% tx$Symbol) {
-    ex.cash.symbols <- unique(tx$Symbol[tx$Symbol != "$"])
-    portfolio.ex.cash.plot <- get.interactive.size.vs.time.plot(
-      tx, ex.cash.symbols, price.provider, "Portfolio Ex-cash")
+  if ("Portfolio Ex-cash" %in% names(agg.tx.tables$size.vs.time.tables)) {
+    portfolio.ex.cash.plot <- get.interactive.size.vs.time.plot(agg.tx.tables, "Portfolio Ex-cash")
     portfolio.ex.cash.plot <- set.full.page.sizing.policy(portfolio.ex.cash.plot)
     portfolio.ex.cash.plot$elementId <- "portfolio-ex-cash-plot"
     symbol.plots <- c(symbol.plots, list(portfolio.ex.cash.plot))
   }
   
-  portfolio.plot <- get.interactive.size.vs.time.plot(
-    tx, unique(tx$Symbol), price.provider, "Portfolio")
+  portfolio.plot <- get.interactive.size.vs.time.plot(agg.tx.tables, "Portfolio")
   portfolio.plot <- set.full.page.sizing.policy(portfolio.plot)
   portfolio.plot$elementId <- "portfolio-plot"
   symbol.plots <- c(symbol.plots, list(portfolio.plot))
   
-  portfolio.summary <- get.portfolio.summary.table(tx, miscellaneous.symbols, price.provider)
+  portfolio.summary <- get.portfolio.summary.table(agg.tx.tables)
   symbol.plots <- c(list(portfolio.summary), symbol.plots)
   
   hc <- combineWidgets(list=symbol.plots, ncol=1)

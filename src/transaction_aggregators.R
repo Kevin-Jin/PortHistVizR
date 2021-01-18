@@ -117,7 +117,7 @@ filter.tx <- function(tx, symbols, from.date, to.date) {
 }
 
 calc.portfolio.size.snapshot <- function(
-    tx, price.provider=recent.transaction.price.provider, date=max(tx$Date)) {
+    tx, price.provider, date, size.vs.time.tables, peak.prices) {
   avg.price <- function(tx.for.factor) {
     cost <- sum(tx.for.factor$Cost)
     quantity <- round(sum(tx.for.factor$Quantity), QTY_FRAC_DIGITS)
@@ -132,8 +132,46 @@ calc.portfolio.size.snapshot <- function(
       Full.Rebound.Gain=quantity * peak.price - cost)
   }
   
-  tx <- tx[tx$Date <= date, ]
-  agg.by.symbol <- reduce.on.factor(tx, "Symbol", avg.price)
+  get.size.vs.time.table <- function(symbol) {
+    if (symbol %in% names(size.vs.time.tables)) {
+      size.vs.time.tables[[symbol]]
+    } else {
+      calc.size.vs.time(tx, symbol, price.provider)
+    }
+  }
+  
+  get.peak.price <- function(symbol) {
+    if (symbol %in% names(peak.prices)) {
+      peak.prices[[symbol]]
+    } else {
+      for.symbol <- tx[tx$Symbol == symbol, c("Price", "Pct.Drawdown")]
+      sum(for.symbol$Price) / sum(1 - for.symbol$Pct.Drawdown / 100)
+    }
+  }
+  
+  agg.by.symbol <- do.call(rbind, lapply(names(size.vs.time.tables), function(symbol) {
+    size.vs.time <- size.vs.time.tables[[symbol]]
+    size.vs.time$Quantity <- round(cumsum(size.vs.time$Quantity), QTY_FRAC_DIGITS)
+    # TODO: utilize the price.provider to calculate peak.price in join.pct.drawdown so that
+    #  Peak.Price == max(size.vs.time$High.Price[size.vs.time$Quantity != 0]).
+    size.vs.time$Peak.Price <- get.peak.price(symbol)
+    snapshot.date <- max(size.vs.time$Date[size.vs.time$Date <= date])
+    size.vs.time <- size.vs.time[size.vs.time$Date == snapshot.date, ]
+    size.vs.time$Symbol <- symbol
+    size.vs.time$Unit.Cost <- size.vs.time$Cost / size.vs.time$Quantity
+    size.vs.time$Cost.Pct.Drawdown <- (1 - size.vs.time$Unit.Cost / size.vs.time$Peak.Price) * 100
+    size.vs.time$Full.Rebound.Gain <- (
+      size.vs.time$Quantity * size.vs.time$Peak.Price - size.vs.time$Cost)
+    col.names <- c(
+      "Symbol", "Quantity", "Unit.Cost", "Cost", "Cost.Pct.Drawdown", "Peak.Price",
+      "Full.Rebound.Gain")
+    size.vs.time[, col.names]
+  }))
+  
+  remaining.tx <- tx[!(tx$Symbol %in% agg.by.symbol$Symbol) & tx$Date <= date, ]
+  if (nrow(remaining.tx) != 0) {
+    agg.by.symbol <- rbind(agg.by.symbol, reduce.on.factor(remaining.tx, "Symbol", avg.price))
+  }
   agg.by.symbol <- agg.by.symbol[order(agg.by.symbol$Cost), ]
   row.names(agg.by.symbol) <- c()
   
@@ -153,7 +191,7 @@ calc.portfolio.size.snapshot <- function(
   
   agg.by.symbol$Unit.Value <- unlist(lapply(
     agg.by.symbol$Symbol,
-    function(symbol) get.current.price(tx, symbol, price.provider, date)))
+    function(symbol) get.current.price(get.size.vs.time.table(symbol), date)))
   agg.by.symbol$Value <- agg.by.symbol$Quantity * agg.by.symbol$Unit.Value
   agg.by.symbol$Value.Pct.Drawdown <- (
     1 - agg.by.symbol$Unit.Value / agg.by.symbol$Peak.Price) * 100
@@ -187,41 +225,35 @@ group.options.and.total.in.portfolio.size.snapshot <- function(agg.by.symbol, mi
     function(root) aggregate.on.portfolio(paste(root, "options"), agg.options[[root]])))
   # TODO: sort agg.options by net cost
   
-  agg.all <- agg.by.symbol[!is.options.symbol(agg.by.symbol$Symbol), ]
-  agg.all <- rbind(agg.all, agg.options)
+  agg.all <- rbind(agg.by.symbol, agg.options)
   if (length(misc.symbols) != 0) {
     agg.all <- rbind(
       agg.all, aggregate.on.portfolio("Miscellaneous", agg.all[agg.all$Symbol %in% misc.symbols, ]))
   }
-  # The calling function wants both the aggregate miscellaneous size as well as the breakdown, so
-  #  both are present in agg.all. Make sure we don't double count miscellaneous symbols in the
-  #  portfolio aggregate though.
+  # The calling function wants both the aggregate miscellaneous size and options size per root as
+  #  well as the breakdowns, so both are present in agg.all. Make sure we don't double count
+  #  miscellaneous and options symbols in the portfolio aggregate though.
   agg.all <- rbind(
-    agg.all, aggregate.on.portfolio("Portfolio", agg.all[agg.all$Symbol != "Miscellaneous", ]))
+    agg.all,
+    aggregate.on.portfolio(
+      "Portfolio",
+      agg.all[agg.all$Symbol != "Miscellaneous" & !is.options.symbol(agg.all$Symbol), ]))
   agg.all
 }
 
 calc.portfolio.size.snapshot.with.day.over.day.gain <- function(
-    tx, price.provider=recent.transaction.price.provider) {
-  # Get the latest date for which we have a price available. Do not solely rely on max(tx$Date)
-  #  since it's possible we haven't made any transactions in a long time.
-  date <- max(
-    do.call(
-      c,
-      lapply(
-        unique(tx$Symbol),
-        function(symbol) max(price.provider$available.dates(symbol), as.Date("0001-01-01"))
-      )
-    )
-  )
-  # We still need to account for max(tx$Date) though since Fidelity adds T + 1 transfers into
-  #  BrokerageLink to the history on T, so max(tx$Date) can potentially be in the future in which
-  #  case we want to make sure we include the transactions on that date when snapping our positions.
-  #  Today's price will just be carried forward into the future date by get.current.price.
-  agg.all <- calc.portfolio.size.snapshot(tx, price.provider, max(tx$Date, date))
+    tx, price.provider=recent.transaction.price.provider, date=get.current.date(tx, price.provider),
+    size.vs.time.tables=NULL, peak.prices=NULL) {
+  # We need to account for max(tx$Date) since Fidelity adds T + 1 transfers into BrokerageLink to
+  #  the history on T, so max(tx$Date) can potentially be in the future in which case we want to
+  #  make sure we include the transactions on that date when snapping our positions. Today's price
+  #  will just be carried forward into the future date by get.current.price.
+  agg.all <- calc.portfolio.size.snapshot(
+    tx, price.provider, max(tx$Date, date), size.vs.time.tables, peak.prices)
   if (any(tx$Date <= date - 1)) {
     # If the latest price date is a Monday, get.current.price will carry forward Friday to Sunday.
-    agg.all.yday <- calc.portfolio.size.snapshot(tx, price.provider, date - 1)
+    agg.all.yday <- calc.portfolio.size.snapshot(
+      tx, price.provider, date - 1, size.vs.time.tables, peak.prices)
   } else {
     agg.all.yday <- data.frame(matrix(ncol=1, nrow=0, dimnames=list(NULL, c("Symbol"))))
   }
@@ -369,46 +401,53 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
 }
 
 calc.portfolio.size.vs.time <- function(
-    tx, symbols, price.provider=recent.transaction.price.provider) {
-  size.vs.time.by.symbol <- lapply(
-    symbols, function(symbol) calc.size.vs.time(tx, symbol, price.provider))
+    tx, symbols, price.provider=recent.transaction.price.provider, other.size.vs.time.tables=NULL) {
+  if (length(symbols) + length(other.size.vs.time.tables) == 0) {
+    return(data.frame(Date=as.Date(character())))
+  }
+  
+  size.vs.time.by.symbol <- c(
+    lapply(symbols, function(symbol) calc.size.vs.time(tx, symbol, price.provider)),
+    other.size.vs.time.tables)
   dates <- sort(unique(do.call(c, lapply(
     size.vs.time.by.symbol, function(for.symbol) unique(for.symbol$Date)))))
   col.names <- names(size.vs.time.by.symbol[[1]])
+  agg.col.names <- col.names[
+    !(col.names %in% c("Date", "Average.Price", "Low.Price", "High.Price", "Quantity"))]
   size.vs.time <- lapply(
-    col.names,
+    agg.col.names,
     function(col.name) rowSums(do.call(cbind, lapply(
       size.vs.time.by.symbol,
       function(for.symbol) stepfun(for.symbol$Date, c(0, for.symbol[, col.name]))(dates)))))
-  size.vs.time <- do.call(data.frame, setNames(size.vs.time, col.names))
+  size.vs.time <- do.call(data.frame, setNames(size.vs.time, agg.col.names))
   size.vs.time$Date <- dates
   size.vs.time[, c("Average.Price", "Low.Price", "High.Price", "Quantity")] <- NA
+  size.vs.time <- size.vs.time[, col.names]
   size.vs.time
 }
 
-get.current.price <- function(
-    tx, symbol, price.provider=recent.transaction.price.provider, date=Sys.Date()) {
-  if (!(symbol %in% tx$Symbol)) {
-    # Create a fake transaction table that will still allow calc.size.vs.time to go to other price
-    #  providers beside recent.transaction.price.provider.
-    tx <- tx[NULL, c("Date", "Symbol", "Quantity", "Cost", "Price", "Reference.Symbol")]
-    tx <- data.frame(
-      Date=c(as.Date("0000-01-01"), date),
-      Symbol=symbol,
-      Quantity=0,
-      Cost=NA,
-      Price=NA,
-      Reference.Symbol=symbol)
-  }
-  size.vs.time <- calc.size.vs.time(tx, symbol, price.provider)
+get.current.dates.by.symbol <- function(symbols, price.provider=recent.transaction.price.provider) {
+  setNames(
+    lapply(
+      symbols, function(symbol) max(as.Date("0001-01-01"), price.provider$available.dates(symbol))),
+    symbols)
+}
+
+get.current.date <- function(tx, price.provider=recent.transaction.price.provider) {
+  # Get the latest date for which we have a price available. Do not solely rely on max(tx$Date)
+  #  since it's possible we haven't made any transactions in a long time.
+  max(do.call(c, get.current.dates.by.symbol(unique(tx$Symbol), price.provider)))
+}
+
+get.current.price <- function(size.vs.time, date=Sys.Date()) {
+  # Some options roots may have no transactions or price history whatsoever. In that case return NA.
   if (all(is.na(size.vs.time$Average.Price)))
     NA
   else
     stepfun(size.vs.time$Date, c(NA, size.vs.time$Average.Price))(date)
 }
 
-identify.tx.nearby <- function(tx, symbol, price.provider=recent.transaction.price.provider) {
-  current.price <- get.current.price(tx, symbol, price.provider)
+identify.tx.nearby <- function(tx, symbol, current.price) {
   tx.for.symbol <- tx[tx$Symbol == symbol, c("Price", "Quantity", "Pct.Drawdown")]
   tx.for.symbol <- reduce.on.factor(tx.for.symbol, "Price", function(for.price)
     data.frame(
@@ -419,4 +458,101 @@ identify.tx.nearby <- function(tx, symbol, price.provider=recent.transaction.pri
   tx.sells <- tx.for.symbol[tx.for.symbol$Quantity < 0 & tx.for.symbol$Price <= current.price, ]
   tx.sells <- head(tx.sells[order(tx.sells$Price, decreasing=TRUE), ], 5)
   rbind(tx.buys, data.frame(Price=current.price, Quantity=NA, Pct.Drawdown=NA), tx.sells)
+}
+
+group.interesting.options <- function(tx, interesting.symbols, is.interesting.option) {
+  interesting.options <- interesting.symbols[is.interesting.option]
+  interesting.options <- substr(
+    interesting.options, 1, nchar(interesting.options) - nchar(" options"))
+  lapply.and.set.names(
+    interesting.options, function(options.root) unique(tx$Symbol[
+      is.options.symbol(tx$Symbol) & sub("\\s+$", "", substr(tx$Symbol, 1, 6)) == options.root]))
+}
+
+get.size.vs.time.tables.with.opt.roots <- function(
+    price.provider, size.vs.time.tables, interesting.options, current.date) {
+  symbols <- names(size.vs.time.tables)
+  # get.interactive.option.payoff.plot needs spot prices, so make sure to cache the prices for
+  #  options roots as well even if we have no transactions on the underlying.
+  symbols.and.options.roots <- unique(c(symbols, names(interesting.options)))
+  # This is not necessarily the same as names(interesting.options) since it excludes overlap with
+  #  underlyings on which transactions were made.
+  options.roots.only <- symbols.and.options.roots[!(symbols.and.options.roots %in% symbols)]
+  c(
+    size.vs.time.tables,
+    lapply.and.set.names(
+      options.roots.only,
+      function(symbol) {
+        # Create a stub transaction table that will still allow calc.size.vs.time to go to other
+        #  price providers beside recent.transaction.price.provider.
+        stub.tx <- data.frame(
+          Date=c(as.Date("0001-01-01"), current.date),
+          Symbol=symbol,
+          Quantity=0,
+          Cost=NA,
+          Price=NA,
+          Reference.Symbol=symbol)
+        calc.size.vs.time(stub.tx, symbol, price.provider)
+      }
+    )
+  )
+}
+
+get.recent.options <- function(tx, formatted.tx.all, misc.symbols) {
+  formatted.tx <- group.options.and.total.in.portfolio.size.snapshot(formatted.tx.all, misc.symbols)
+  
+  formatted.tx.options <- formatted.tx.all[is.options.symbol(formatted.tx.all$Symbol), ]
+  options.roots <- sub("\\s+$", "", substr(formatted.tx.options$Symbol, 1, 6))
+  # First, grab all options positions that are currently open.
+  open.options.by.root <- split(
+    formatted.tx.options$Symbol[formatted.tx.options$Quantity != 0],
+    options.roots[formatted.tx.options$Quantity != 0])
+  # Then, grab the most recently transacted options until we have at least 8 per root.
+  closed.options.by.root <- lapply(
+    split(
+      formatted.tx.options$Symbol[formatted.tx.options$Quantity == 0],
+      options.roots[formatted.tx.options$Quantity == 0]
+    ), function(for.root) {
+      for.root <- unique(tx[tx$Symbol %in% for.root, c("Symbol", "Date")])
+      for.root <- do.call(rbind, lapply(split(for.root, for.root$Symbol), function(for.symbol) {
+        data.frame(Symbol=for.symbol$Symbol[1], Date=max(for.symbol$Date), stringsAsFactors=FALSE)
+      }))
+      recent.dates <- head(
+        sort(for.root$Date, partial=seq_len(min(8, nrow(for.root))), decreasing=TRUE), 8)
+      for.root <- for.root[for.root$Date %in% recent.dates, ]
+      for.root$Symbol[order(for.root$Date, decreasing=TRUE)]
+    })
+  options.roots <- unique(options.roots)
+  do.call(
+    c,
+    Map(function(open.for.root, closed.for.root) {
+      c(open.for.root, head(closed.for.root, 8 - min(length(open.for.root), 8)))
+    }, open.options.by.root[options.roots], closed.options.by.root[options.roots]))
+}
+
+get.recent.transactions <- function(tx, symbol) {
+  # Include dividend and interest transactions, but not fees, cash contra transactions, deposits,
+  #  and withdrawals.
+  # TODO: support deposits and withdrawals. Either add a new column to the transaction table for
+  #  identifying cash contra transactions, or group transactions by date and subtract non-cash
+  #  costs with no reference symbol from cash costs with no reference symbol to get day's net
+  #  inflow.
+  for.symbol <- tx[
+    tx$Symbol == symbol & (
+      if (symbol == "$") (tx$Reference.Symbol == "$" & tx$Cost < 0)
+      else (tx$Reference.Symbol == "" | tx$Cost < 0)
+    ),
+    c("Date", "Price", "Quantity", "Cost")]
+  recent.dates <- head(
+    sort(for.symbol$Date, partial=seq_len(min(10, nrow(for.symbol))), decreasing=TRUE), 10)
+  for.symbol <- for.symbol[for.symbol$Date %in% recent.dates, ]
+  # Preserve intraday transaction order if Date is already sorted ascending or descending.
+  if (!is.unsorted(for.symbol$Date) && min(for.symbol$Date) != max(for.symbol$Date)) {
+    # Sorted in ascending order. Flip it around.
+    for.symbol <- for.symbol[rev(seq_len(nrow(for.symbol))), ]
+  } else if (is.unsorted(rev(for.symbol$Date))) {
+    # Neither sorted in ascending nor descending order. Order it ourselves.
+    for.symbol <- for.symbol[order(for.symbol$Date, for.symbol$Price, decreasing=TRUE), ]
+  }
+  for.symbol
 }
