@@ -1,7 +1,3 @@
-lapply.and.set.names <- function(names, fn) {
-  setNames(lapply(names, fn), names)
-}
-
 get.miscellaneous.symbols <- function(symbols, interesting.stocks, interesting.options) {
   interesting.symbols.expanded <- c("$", interesting.stocks, do.call(c, interesting.options))
   symbols[!(symbols %in% interesting.symbols.expanded)]
@@ -28,13 +24,21 @@ create.agg.tx.tables <- function(
   tx <- coalesce.tx.by.date.symbol.price(tx)
   tx <- join.cost(tx)
   tx <- join.pct.drawdown(tx)
-  tx.by.symbol <- reduce.on.factor(
-    tx[tx$Symbol %in% interesting.stocks, ], "Symbol",
-    function(tx.for.symbol) data.frame(Cost=sum(tx.for.symbol$Cost)))
-  interesting.stocks <- tx.by.symbol$Symbol[order(tx.by.symbol$Cost, decreasing=TRUE)]
   if (obfuscate.cost) {
+    tx.by.symbol <- reduce.on.factor(
+      tx, "Symbol", function(tx.for.symbol) data.frame(Cost=sum(tx.for.symbol$Cost)))
     tx$Cost <- 100 * tx$Cost / abs(tx.by.symbol$Cost[match(tx$Symbol, tx.by.symbol$Symbol)])
     tx$Quantity <- 100 * tx$Quantity / abs(tx.by.symbol$Cost[match(tx$Symbol, tx.by.symbol$Symbol)])
+    tx.by.symbol <- tx.by.symbol[tx.by.symbol$Symbol %in% interesting.stocks, ]
+  } else {
+    tx.by.symbol <- reduce.on.factor(
+      tx[tx$Symbol %in% interesting.stocks, ], "Symbol",
+      function(tx.for.symbol) data.frame(Cost=sum(tx.for.symbol$Cost)))
+  }
+  if (!is.null(tx.by.symbol) && nrow(tx.by.symbol) != 0) {
+    interesting.stocks <- tx.by.symbol$Symbol[order(tx.by.symbol$Cost, decreasing=TRUE)]
+  } else {
+    interesting.stocks <- c()
   }
   
   current.dates.by.symbol <- get.current.dates.by.symbol(symbols, price.provider)
@@ -72,22 +76,33 @@ create.agg.tx.tables <- function(
   # "$", interesting.stocks, do.call(c, interesting.options), and miscellaneous.symbols must be
   #  disjoint and the union of them must be equal to symbols. We can then reuse all the already
   #  calculated size vs. time tables to create the portfolio's.
-  all.ex.cash.size.vs.time.tables <- size.vs.time.tables[
-    c(interesting.stocks, paste(names(interesting.options), "options"), "Miscellaneous")]
-  if ("$" %in% symbols) {
-    stopifnot(
-      sort(c("$", interesting.stocks, do.call(c, interesting.options), miscellaneous.symbols))
-      == sort(symbols))
-    size.vs.time.tables$`Portfolio Ex-cash` <- calc.portfolio.size.vs.time(
-      tx, c(), price.provider, all.ex.cash.size.vs.time.tables)
+  all.ex.cash.symbols <- interesting.stocks
+  if (length(interesting.options) != 0) {
+    all.ex.cash.symbols <- c(all.ex.cash.symbols, paste(names(interesting.options), "options"))
+  }
+  if (length(miscellaneous.symbols) != 0) {
+    all.ex.cash.symbols <- c(all.ex.cash.symbols, "Miscellaneous")
+  }
+  all.ex.cash.size.vs.time.tables <- size.vs.time.tables[all.ex.cash.symbols]
+  # 401k accounts can have no cash transactions if all contributions are directly invested into
+  #  mutual funds and all purchases and sales are exchanges between two mutual funds. There's no
+  #  need to distinguish size vs. time between Portfolio Ex-cash and Portfolio in this case.
+  cash.sym <- if ("$" %in% symbols) "$" else c()
+  stopifnot(
+    sort(c(cash.sym, interesting.stocks, do.call(c, interesting.options), miscellaneous.symbols))
+    == sort(symbols))
+  if (length(all.ex.cash.size.vs.time.tables) == 0) {
+    # Transaction history consists only of cash deposits. No purchases have been made yet.
     size.vs.time.tables$Portfolio <- calc.portfolio.size.vs.time(
-      tx, "$", price.provider, size.vs.time.tables["Portfolio Ex-cash"])
+      tx, cash.sym, price.provider, all.ex.cash.size.vs.time.tables)
   } else {
-    stopifnot(
-      sort(c(interesting.stocks, do.call(c, interesting.options), miscellaneous.symbols))
-      == sort(symbols))
-    size.vs.time.tables$`Portfolio` <- calc.portfolio.size.vs.time(
+    size.vs.time.tables$Portfolio <- calc.portfolio.size.vs.time(
       tx, c(), price.provider, all.ex.cash.size.vs.time.tables)
+    if (length(cash.sym) != 0) {
+      size.vs.time.tables$`Portfolio Ex-cash` <- size.vs.time.tables$Portfolio
+      size.vs.time.tables$Portfolio <- calc.portfolio.size.vs.time(
+        tx, cash.sym, price.provider, size.vs.time.tables["Portfolio Ex-cash"])
+    }
   }
   
   unit.costs <- lapply.and.set.names(symbols, function(symbol) get.unit.cost(tx, symbol))

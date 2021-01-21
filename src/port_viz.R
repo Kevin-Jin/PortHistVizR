@@ -26,6 +26,8 @@ port.viz <- function(
     refresh.alphavantage.prices(transaction.file.loaders, alpha.vantage.key, day.lag)
   }
   
+  print(Sys.time())
+  
   tx <- do.call(rbind, lapply(
     names(transaction.file.loaders),
     function(file.name) transaction.file.loaders[[file.name]](file.name)))

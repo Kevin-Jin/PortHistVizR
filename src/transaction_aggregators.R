@@ -1,3 +1,7 @@
+lapply.and.set.names <- function(names, fn) {
+  setNames(lapply(names, fn), names)
+}
+
 reduce.on.factor <- function(frame, factor.name, func) {
   # This preserves order of each factor's first appearance in frame as opposed to natural ordering
   #  under split's default behavior of calling as.factor.
@@ -155,9 +159,12 @@ calc.portfolio.size.snapshot <- function(
     # TODO: utilize the price.provider to calculate peak.price in join.pct.drawdown so that
     #  Peak.Price == max(size.vs.time$High.Price[size.vs.time$Quantity != 0]).
     size.vs.time$Peak.Price <- get.peak.price(symbol)
-    snapshot.date <- max(size.vs.time$Date[size.vs.time$Date <= date])
+    # calc.portfolio.size.snapshot.with.day.over.day.gain passes the same size.vs.time.tables
+    #  structure for both T and T - 1. Any positions that were entered on T will still show up in
+    #  the tables even though no positions existed in T - 1.
+    snapshot.date <- max(as.Date("0001-01-01"), size.vs.time$Date[size.vs.time$Date <= date])
     size.vs.time <- size.vs.time[size.vs.time$Date == snapshot.date, ]
-    size.vs.time$Symbol <- symbol
+    size.vs.time$Symbol <- rep(symbol, nrow(size.vs.time))
     size.vs.time$Unit.Cost <- size.vs.time$Cost / size.vs.time$Quantity
     size.vs.time$Cost.Pct.Drawdown <- (1 - size.vs.time$Unit.Cost / size.vs.time$Peak.Price) * 100
     size.vs.time$Full.Rebound.Gain <- (
@@ -464,9 +471,10 @@ group.interesting.options <- function(tx, interesting.symbols, is.interesting.op
   interesting.options <- interesting.symbols[is.interesting.option]
   interesting.options <- substr(
     interesting.options, 1, nchar(interesting.options) - nchar(" options"))
-  lapply.and.set.names(
+  interesting.options <- lapply.and.set.names(
     interesting.options, function(options.root) unique(tx$Symbol[
       is.options.symbol(tx$Symbol) & sub("\\s+$", "", substr(tx$Symbol, 1, 6)) == options.root]))
+  interesting.options[lapply(interesting.options, length) != 0]
 }
 
 get.size.vs.time.tables.with.opt.roots <- function(
@@ -547,7 +555,12 @@ get.recent.transactions <- function(tx, symbol) {
     sort(for.symbol$Date, partial=seq_len(min(10, nrow(for.symbol))), decreasing=TRUE), 10)
   for.symbol <- for.symbol[for.symbol$Date %in% recent.dates, ]
   # Preserve intraday transaction order if Date is already sorted ascending or descending.
-  if (!is.unsorted(for.symbol$Date) && min(for.symbol$Date) != max(for.symbol$Date)) {
+  # nrow(for.symbol) can be 0 if symbol == "$" if no interest payments have been made yet, so pass
+  #  defaults to min and max.
+  if (
+    !is.unsorted(for.symbol$Date)
+    && min(as.Date("9999-12-31"), for.symbol$Date) != max(as.Date("0001-01-01"), for.symbol$Date)
+  ) {
     # Sorted in ascending order. Flip it around.
     for.symbol <- for.symbol[rev(seq_len(nrow(for.symbol))), ]
   } else if (is.unsorted(rev(for.symbol$Date))) {

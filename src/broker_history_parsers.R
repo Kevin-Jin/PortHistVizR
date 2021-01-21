@@ -55,7 +55,6 @@ adjust.for.schwab.corporate.actions <- function(tx) {
   is.expired <- tx$Action %in% c("Expired", "Assigned") | tx$Action == "Journal" & tx$Symbol != "$"
   stopifnot(all(is.na(tx[is.expired, c("Price", "Amount")])))
   stopifnot(all(tx[is.expired, "Fees & Comm"] == 0))
-  stopifnot(all(tx[tx$Action == "Expired", "Quantity"] < 0))
   stopifnot(all(tx[tx$Action == "Assigned", "Quantity"] > 0))
   tx[is.expired, c("Price", "Fees & Comm", "Amount")] <- 0
   
@@ -107,9 +106,11 @@ append.contra.tx <- function(tx) {
     fees.and.comm <- fees.and.comm[fees.and.comm$Amount != 0, ]
     fees.and.comm$Quantity <- fees.and.comm$Amount
     fees.and.comm$Reference.Symbol <- fees.and.comm$Symbol
-    fees.and.comm$Symbol <- "$"
-    fees.and.comm$Price <- 1
-    fees.and.comm$`Fees & Comm` <- 0
+    if (nrow(fees.and.comm) > 0) {
+      fees.and.comm$Symbol <- "$"
+      fees.and.comm$Price <- 1
+      fees.and.comm$`Fees & Comm` <- 0
+    }
     
     # Fees impact the value of cash positions but not the cost of cash positions. Contra
     #  transactions impact both the value and the cost of cash positions. Fee transactions are
@@ -322,11 +323,28 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
     #  though it calculates the transaction amount using the unit price up to 4 decimal places.
     whole.qty.tx.part <- tx.part[!is.mutual.fund.symbol(tx.part$Symbol) | tx.part$Symbol == "$", ]
     stopifnot(
-      max(abs(whole.qty.tx.part$Price - (whole.qty.tx.part$Amount - whole.qty.tx.part$`Fees & Comm`) / whole.qty.tx.part$Quantity), -Inf) < 0.01)
+      max(
+        abs(
+          whole.qty.tx.part$Price
+          - (whole.qty.tx.part$Amount - whole.qty.tx.part$`Fees & Comm`)
+          / whole.qty.tx.part$Quantity
+        ),
+        -Inf
+      )
+      < 0.01
+    )
     # For transactions that specify three decimal places of precision in quantities, verify that
     #  Price * (Quantity + 0.001) exceeds (Amount - Fees & Comm).
     frac.qty.tx.part <- tx.part[is.mutual.fund.symbol(tx.part$Symbol) & tx.part$Symbol != "$", ]
-    stopifnot(min(frac.qty.tx.part$Price - (frac.qty.tx.part$Amount - frac.qty.tx.part$`Fees & Comm`) / (frac.qty.tx.part$Quantity + 0.001), Inf) >= 0)
+    stopifnot(
+      min(
+        frac.qty.tx.part$Price
+        - (frac.qty.tx.part$Amount - frac.qty.tx.part$`Fees & Comm`)
+        / (frac.qty.tx.part$Quantity + 0.001),
+        Inf
+      )
+      >= 0
+    )
     tx.part <- tx.part[, c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
     
     # Make tx.part and tx disjoint.
