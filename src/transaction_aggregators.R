@@ -497,8 +497,8 @@ get.size.vs.time.tables.with.opt.roots <- function(
           Date=c(as.Date("0001-01-01"), current.date),
           Symbol=symbol,
           Quantity=0,
-          Cost=NA,
-          Price=NA,
+          Cost=0,
+          Price=0,
           Reference.Symbol=symbol)
         calc.size.vs.time(stub.tx, symbol, price.provider)
       }

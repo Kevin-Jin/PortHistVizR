@@ -52,8 +52,8 @@ adjust.for.schwab.corporate.actions <- function(tx) {
   # We have to be careful and make sure to only use tx in recent.transaction.price.provider after
   #  washing out journals with their contra ones through coalesce.tx.by.date.symbol.price because,
   #  unlike in the case of expiration or assignment, the option is not truly worth 0.
-  is.expired <- tx$Action %in% c("Expired", "Assigned") | tx$Action == "Journal" & tx$Symbol != "$"
-  stopifnot(all(is.na(tx[is.expired, c("Price", "Amount")])))
+  is.expired <- tx$Action %in% c("Expired", "Assigned", "Exchange or Exercise") | tx$Action == "Journal" & tx$Symbol != "$"
+  stopifnot(all(is.na(tx[is.expired, c("Amount")])))
   stopifnot(all(tx[is.expired, "Fees & Comm"] == 0))
   stopifnot(all(tx[tx$Action == "Assigned", "Quantity"] > 0))
   tx[is.expired, c("Price", "Fees & Comm", "Amount")] <- 0
@@ -73,8 +73,9 @@ normalize.schwab.option.symbol <- function(tx) {
   option.matches <- regexpr(
     "^(\\w+) (\\d{2}/\\d{2}/\\d{4}) (\\d+\\.\\d+) ([CP])$", tx$Symbol, perl=TRUE)
   matched.symbols <- tx$Symbol[option.matches != -1]
-  capture.start <- attr(option.matches, "capture.start")[option.matches != -1, ]
-  capture.stop <- capture.start + attr(option.matches, "capture.length")[option.matches != -1, ] - 1
+  capture.start <- attr(option.matches, "capture.start")[option.matches != -1, , drop=FALSE]
+  capture.stop <- capture.start + attr(
+    option.matches, "capture.length")[option.matches != -1, , drop=FALSE] - 1
 
   root.symbol <- substr(matched.symbols, capture.start[, 1], capture.stop[, 1])
   expiration.date <- as.Date(
@@ -132,11 +133,11 @@ load.schwab.transactions <- function(export.file) {
     Action=c(
       "Buy", "Buy to Open", "Buy to Close",
       "Sell", "Sell to Open", "Sell to Close", "Sell Short",
-      "Reverse Split", "Expired", "Assigned", "Journal"),
+      "Reverse Split", "Expired", "Assigned", "Exchange or Exercise", "Journal"),
     Sign=c(
       +1, +1, +1,
       -1, -1, -1, -1,
-      +1, +1, +1, +1))
+      +1, +1, +1, +1, +1))
   cash.actions <- c(
     "MoneyLink Transfer", "Bank Interest", "Cash Dividend", "Pr Yr Cash Div", "Service Fee")
   
@@ -203,8 +204,9 @@ normalize.fidelity.option.symbol <- function(tx.part) {
   option.matches <- regexpr(
     "^-(\\w+)(\\d{6})([CP])(\\d+(?:\\.\\d+)?)$", tx.part$Symbol, perl=TRUE)
   matched.symbols <- tx.part$Symbol[option.matches != -1]
-  capture.start <- attr(option.matches, "capture.start")[option.matches != -1, ]
-  capture.stop <- capture.start + attr(option.matches, "capture.length")[option.matches != -1, ] - 1
+  capture.start <- attr(option.matches, "capture.start")[option.matches != -1, , drop=FALSE]
+  capture.stop <- capture.start + attr(
+    option.matches, "capture.length")[option.matches != -1, , drop=FALSE] - 1
 
   root.symbol <- substr(matched.symbols, capture.start[, 1], capture.stop[, 1])
   expiration.date <- as.Date(
@@ -334,13 +336,16 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
       < 0.01
     )
     # For transactions that specify three decimal places of precision in quantities, verify that
-    #  Price * (Quantity + 0.001) exceeds (Amount - Fees & Comm).
+    #  (Price + 0.01) * (Quantity + 0.001) exceeds (Amount - Fees & Comm).
+    # Some mutual funds, like DXELX, DXRLX, and DXQLX have NAVs out to four decimal places but
+    #  Fidelity only reports them to two decimal places in the transaction history, so tolerate a
+    #  one cent error in price as well.
     frac.qty.tx.part <- tx.part[is.mutual.fund.symbol(tx.part$Symbol) & tx.part$Symbol != "$", ]
     stopifnot(
       min(
-        frac.qty.tx.part$Price
-        - (frac.qty.tx.part$Amount - frac.qty.tx.part$`Fees & Comm`)
-        / (frac.qty.tx.part$Quantity + 0.001),
+        (frac.qty.tx.part$Price + 0.01)
+        - abs(frac.qty.tx.part$Amount - frac.qty.tx.part$`Fees & Comm`)
+        / (abs(frac.qty.tx.part$Quantity) + 0.001),
         Inf
       )
       >= 0
@@ -535,8 +540,15 @@ load.alphavantage.prices <- function(directory, fallback) {
     }
     
     if (nrow(for.symbol) > 0) {
-      for.symbol <- for.symbol[, c("timestamp", "high", "low", "close")]
-      colnames(for.symbol) <- c("Date", "High", "Low", "Close")
+      colname.mapping <- rbind(
+        c("timestamp", "Date"), c("high", "High"), c("low", "Low"), c("close", "Close"))
+      # Alpha Vantage doesn't have prices for index option underlyers, e.g. SPX, VIX, NDX, RUT.
+      # The current recommended way to avoid price download attempts on every call to
+      # refresh.alphavantage.prices is to create a CSV file in directory containing rows for
+      # 0001-01-01 and 9999-12-31. Only a timestamp column should be required for these stub CSVs.
+      for.symbol[, colname.mapping[!(colname.mapping[, 1] %in% colnames(for.symbol)), 1]] <- NA
+      for.symbol <- for.symbol[, colname.mapping[, 1]]
+      colnames(for.symbol) <- colname.mapping[, 2]
       price.overrides <- rbind(
         price.overrides, cbind(Symbol=symbol, for.symbol, stringsAsFactors=FALSE))
     }
@@ -619,9 +631,16 @@ refresh.alphavantage.prices <- function(
         px.last.date <- max(existing.price.dates)
         px.first.date <- min(existing.price.dates)
         
-        px.next.date <- px.last.date + 1
-        while (!isBizday(as.timeDate(px.next.date), holidayNYSE())) {
-          px.next.date <- px.next.date + 1
+        # Alpha Vantage doesn't have prices for index option underlyers, e.g. SPX, VIX, NDX, RUT.
+        # The current recommended way to avoid price download attempts on every call to
+        # refresh.alphavantage.prices is to create a CSV file in directory containing rows for
+        # 0001-01-01 and 9999-12-31. Make sure px.last.date doesn't overflow into year 10000 since R
+        # can't parse that year.
+        if (px.last.date != as.Date("9999-12-31")) {
+          px.next.date <- px.last.date + 1
+          while (!isBizday(as.timeDate(px.next.date), holidayNYSE())) {
+            px.next.date <- px.next.date + 1
+          }
         }
         px.next.time <- as.POSIXct(format(px.next.date))
         attr(px.next.time, "tzone") <- exch.tzone
@@ -629,6 +648,13 @@ refresh.alphavantage.prices <- function(
         px.next.time$hour <- exch.close[1]
         px.next.time$min <- exch.close[2]
         px.next.time <- as.POSIXct(px.next.time)
+        
+        # If the existing file has prices before this account's first transaction date on the
+        # symbol or prices after this account's last transaction date on the symbol, make sure to
+        # save refreshed prices for those dates as well. This can happen if running PHVR on multiple
+        # accounts that have had positions on the same symbol at different points in time.
+        tx.first.date <- min(px.first.date, tx.first.date)
+        tx.last.date <- max(px.last.date, tx.last.date)
         
         if ((px.next.time > now || px.last.date >= tx.last.date)
             && px.first.date <= tx.first.date) {
