@@ -315,18 +315,21 @@ get.interactive.size.vs.price.plot <- function(agg.tx.tables, symbol, tick.size=
     size.vs.price$Quantity < 0,
     floor(round(size.vs.price$Price * (1 / tick.size), 4)) / (1 / tick.size),
     ceiling(round(size.vs.price$Price * (1 / tick.size), 4)) / (1 / tick.size))
-  # Double check that we didn't round any already tick-aligned price or a price to the wrong direction.
-  round.off.range <- round(
-    range(c(
-      (size.vs.price$Price - size.vs.price$Raw.Price)[size.vs.price$Quantity > 0],
-      (size.vs.price$Raw.Price - size.vs.price$Price)[size.vs.price$Quantity < 0])),
-    4)
-  stopifnot(round.off.range[1] >= 0 && round.off.range[2] < tick.size)
-  size.vs.price <- reduce.on.factor(size.vs.price, "Price", function(for.price)
-    data.frame(
-      Cost=sum(for.price$Cost),
-      Cum.Cost=tail(for.price$Cum.Cost[order(for.price$Pct.Drawdown)], 1),
-      Quantity=round(sum(for.price$Quantity), QTY_FRAC_DIGITS)))
+  # Double check that we didn't round any already tick-aligned price or a price to the wrong
+  #  direction.
+  if (nrow(size.vs.price) != 0) {
+    round.off.range <- round(
+      range(c(
+        (size.vs.price$Price - size.vs.price$Raw.Price)[size.vs.price$Quantity > 0],
+        (size.vs.price$Raw.Price - size.vs.price$Price)[size.vs.price$Quantity < 0])),
+      4)
+    stopifnot(round.off.range[1] >= 0 && round.off.range[2] < tick.size)
+    size.vs.price <- reduce.on.factor(size.vs.price, "Price", function(for.price)
+      data.frame(
+        Cost=sum(for.price$Cost),
+        Cum.Cost=tail(for.price$Cum.Cost[order(for.price$Pct.Drawdown)], 1),
+        Quantity=round(sum(for.price$Quantity), QTY_FRAC_DIGITS)))
+  }
   size.vs.price$Pct.Drawdown <- 100 * (1 - size.vs.price$Price / peak.price)
   size.vs.price <- size.vs.price[order(size.vs.price$Pct.Drawdown), ]
   
@@ -360,8 +363,12 @@ get.interactive.size.vs.price.plot <- function(agg.tx.tables, symbol, tick.size=
         "", sep="<br/>")),
       color=colors$blue)
   
-  interp.cum.cost.at.price <- stepfun(
-    x=size.vs.price$Pct.Drawdown, y=c(0, size.vs.price$Cum.Cost), right=FALSE, f=0)
+  if (nrow(size.vs.price) == 0) {
+    interp.cum.cost.at.price <- function(x) NA
+  } else {
+    interp.cum.cost.at.price <- stepfun(
+      x=size.vs.price$Pct.Drawdown, y=c(0, size.vs.price$Cum.Cost), right=FALSE, f=0)
+  }
   for (series in list(
       list(name="Unit.Cost", price=unit.cost, pct.drawdown=average.pct.drawdown, color=colors$red),
       list(
