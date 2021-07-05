@@ -113,6 +113,10 @@ join.pct.drawdown <- function(tx) {
   tx[order(tx$Row.Order), -which(colnames(tx) == "Row.Order")]
 }
 
+get.peak.price.from.pct.drawdown <- function(tx) {
+  round(sum(tx$Price) / sum(1 - tx$Pct.Drawdown / 100), PX_FRAC_DIGITS)
+}
+
 filter.tx <- function(tx, symbols, from.date, to.date) {
   tx <- tx[
     (is.null(symbols) | tx$Symbol %in% symbols | is.options.symbol(tx$Symbol))
@@ -123,9 +127,9 @@ filter.tx <- function(tx, symbols, from.date, to.date) {
 calc.portfolio.size.snapshot <- function(
     tx, price.provider, date, size.vs.time.tables, peak.prices) {
   avg.price <- function(tx.for.factor) {
-    cost <- sum(tx.for.factor$Cost)
+    cost <- round(sum(tx.for.factor$Cost), CALC_FRAC_DIGITS)
     quantity <- round(sum(tx.for.factor$Quantity), QTY_FRAC_DIGITS)
-    peak.price <- sum(tx.for.factor$Price) / sum(1 - tx.for.factor$Pct.Drawdown / 100)
+    peak.price <- get.peak.price.from.pct.drawdown(tx.for.factor)
     unit.cost <- cost / quantity
     data.frame(
       Quantity=quantity,
@@ -133,7 +137,7 @@ calc.portfolio.size.snapshot <- function(
       Cost=cost,
       Cost.Pct.Drawdown=(1 - unit.cost / peak.price) * 100,
       Peak.Price=peak.price,
-      Full.Rebound.Gain=quantity * peak.price - cost)
+      Full.Rebound.Gain=round(quantity * peak.price - cost, CALC_FRAC_DIGITS))
   }
   
   get.size.vs.time.table <- function(symbol) {
@@ -149,7 +153,7 @@ calc.portfolio.size.snapshot <- function(
       peak.prices[[symbol]]
     } else {
       for.symbol <- tx[tx$Symbol == symbol, c("Price", "Pct.Drawdown")]
-      sum(for.symbol$Price) / sum(1 - for.symbol$Pct.Drawdown / 100)
+      get.peak.price.from.pct.drawdown(for.symbol)
     }
   }
   
@@ -167,8 +171,8 @@ calc.portfolio.size.snapshot <- function(
     size.vs.time$Symbol <- rep(symbol, nrow(size.vs.time))
     size.vs.time$Unit.Cost <- size.vs.time$Cost / size.vs.time$Quantity
     size.vs.time$Cost.Pct.Drawdown <- (1 - size.vs.time$Unit.Cost / size.vs.time$Peak.Price) * 100
-    size.vs.time$Full.Rebound.Gain <- (
-      size.vs.time$Quantity * size.vs.time$Peak.Price - size.vs.time$Cost)
+    size.vs.time$Full.Rebound.Gain <- round(
+      size.vs.time$Quantity * size.vs.time$Peak.Price - size.vs.time$Cost, CALC_FRAC_DIGITS)
     col.names <- c(
       "Symbol", "Quantity", "Unit.Cost", "Cost", "Cost.Pct.Drawdown", "Peak.Price",
       "Full.Rebound.Gain")
@@ -199,10 +203,10 @@ calc.portfolio.size.snapshot <- function(
   agg.by.symbol$Unit.Value <- unlist(lapply(
     agg.by.symbol$Symbol,
     function(symbol) get.current.price(get.size.vs.time.table(symbol), date)))
-  agg.by.symbol$Value <- agg.by.symbol$Quantity * agg.by.symbol$Unit.Value
+  agg.by.symbol$Value <- round(agg.by.symbol$Quantity * agg.by.symbol$Unit.Value, CALC_FRAC_DIGITS)
   agg.by.symbol$Value.Pct.Drawdown <- (
     1 - agg.by.symbol$Unit.Value / agg.by.symbol$Peak.Price) * 100
-  agg.by.symbol$Gain <- agg.by.symbol$Value - agg.by.symbol$Cost
+  agg.by.symbol$Gain <- round(agg.by.symbol$Value - agg.by.symbol$Cost, CALC_FRAC_DIGITS)
   
   agg.by.symbol
 }
@@ -267,7 +271,7 @@ calc.portfolio.size.snapshot.with.day.over.day.gain <- function(
   
   yday.idx <- match(agg.all$Symbol, agg.all.yday$Symbol)
   yday.gain <- ifelse(is.na(yday.idx), 0, agg.all.yday$Gain[yday.idx])
-  cbind(agg.all, Day.Over.Day.Gain=agg.all$Gain - yday.gain)
+  cbind(agg.all, Day.Over.Day.Gain=round(agg.all$Gain - yday.gain, CALC_FRAC_DIGITS))
 }
 
 solve.entry.price.and.quantity <- function(tx, target.net.pct.drawdown, target.portfolio.net.cost) {
@@ -276,7 +280,7 @@ solve.entry.price.and.quantity <- function(tx, target.net.pct.drawdown, target.p
   #  % drawdown.
   current.portfolio.net.cost <- sum(tx$Cost)
   reduce.on.factor(tx, "Symbol", function(tx.for.symbol) {
-    peak.price <- sum(tx.for.symbol$Price) / sum(1 - tx.for.symbol$Pct.Drawdown / 100)
+    peak.price <- get.peak.price.from.pct.drawdown(tx.for.symbol)
     current.net.quantity <- sum(tx.for.symbol$Quantity)
     current.net.cost <- sum(tx.for.symbol$Cost)
     target.net.price <- peak.price * (1 - target.net.pct.drawdown / 100)
@@ -297,7 +301,7 @@ solve.entry.price.and.quantity <- function(tx, target.net.pct.drawdown, target.p
 
 calc.price.vs.time <- function(tx, symbol) {
   tx <- tx[tx$Symbol == symbol, ]
-  peak.price <- sum(tx$Price) / sum(1 - tx$Pct.Drawdown / 100)
+  peak.price <- get.peak.price.from.pct.drawdown(tx)
   tx <- tx[, c("Date", "Quantity", "Cost")]
   if (any(tx$Quantity > 0)) {
     purchase.prices <- reduce.on.factor(
@@ -331,7 +335,8 @@ calc.size.vs.price <- function(tx, symbol, bucket.width=1, carry.down.sales=TRUE
     tx$Pct.Drawdown <- trunc(tx$Pct.Drawdown / bucket.width) * bucket.width
   costs <- reduce.on.factor(tx, "Pct.Drawdown", function(for.pct.drawdown) {
     data.frame(
-      Cost=sum(for.pct.drawdown$Cost), Quantity=sum(for.pct.drawdown$Quantity))
+      Cost=round(sum(for.pct.drawdown$Cost), CALC_FRAC_DIGITS),
+      Quantity=round(sum(for.pct.drawdown$Quantity), QTY_FRAC_DIGITS))
   })
   costs <- costs[order(costs$Pct.Drawdown), ]
   
@@ -346,7 +351,7 @@ calc.size.vs.price <- function(tx, symbol, bucket.width=1, carry.down.sales=TRUE
   
   # TODO: cumulative cost can be done on unrounded Pct.Drawdown. Line doesn't need to be bucketized
   #  unlike histogram.
-  costs$Cum.Cost <- cumsum(costs$Cost)
+  costs$Cum.Cost <- round(cumsum(costs$Cost), CALC_FRAC_DIGITS)
   if (carry.down.sales) {
     # Permit last bucket to be negative, but negative costs for all other buckets must be carried
     #  down.
@@ -400,7 +405,7 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
   costs$Low.Price[is.na(costs$Low.Price)] <- costs$Average.Price[is.na(costs$Low.Price)]
   costs$High.Price[is.na(costs$High.Price)] <- costs$Average.Price[is.na(costs$High.Price)]
   
-  costs$Cost <- cumsum(costs$Cost)
+  costs$Cost <- round(cumsum(costs$Cost), CALC_FRAC_DIGITS)
   costs$Value <- costs$Average.Price * cumsum(costs$Quantity)
   costs$Low.Value <- costs$Low.Price * cumsum(costs$Quantity)
   costs$High.Value <- costs$High.Price * cumsum(costs$Quantity)
@@ -423,6 +428,7 @@ calc.portfolio.size.vs.time <- function(
     !(col.names %in% c("Date", "Average.Price", "Low.Price", "High.Price", "Quantity"))]
   size.vs.time <- lapply(
     agg.col.names,
+    # TODO: flip Low.Price and High.Price for negative quantity positions.
     function(col.name) rowSums(do.call(cbind, lapply(
       size.vs.time.by.symbol,
       function(for.symbol) stepfun(for.symbol$Date, c(0, for.symbol[, col.name]))(dates)))))
@@ -430,6 +436,7 @@ calc.portfolio.size.vs.time <- function(
   size.vs.time$Date <- dates
   size.vs.time[, c("Average.Price", "Low.Price", "High.Price", "Quantity")] <- NA
   size.vs.time <- size.vs.time[, col.names]
+  size.vs.time$Cost <- round(size.vs.time$Cost, CALC_FRAC_DIGITS)
   size.vs.time
 }
 

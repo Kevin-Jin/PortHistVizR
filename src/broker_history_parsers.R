@@ -6,6 +6,11 @@
 # Floating point error is well below 1e-6, so this level of precision should not introduce numerical
 #  noise for brokers with lower precision quantities.
 QTY_FRAC_DIGITS <- 6
+PX_FRAC_DIGITS <- 4
+# This is used to round Price * Quantity. This should still smooth off most floating point errors
+#  for position sizes up to 5 integer digits since double-precision floating point operations are
+#  accurate to about 16 significant digits.
+CALC_FRAC_DIGITS <- PX_FRAC_DIGITS + QTY_FRAC_DIGITS
 
 is.options.symbol <- function(symbol) {
   regexpr("^[\\w ]{6}\\d{6}[CP]\\d{8}$", symbol, perl=TRUE) != -1
@@ -19,7 +24,8 @@ is.mutual.fund.symbol <- function(symbol) {
 adjust.options.prices <- function(prices.for.symbols, contract.multiplier=100) {
   # Price can only be 0 for options expiration transactions. Expiration has no commissions.
   is.opt <- is.options.symbol(prices.for.symbols$Symbol) & prices.for.symbols$Price != 0
-  prices.for.symbols$Price[is.opt] <- prices.for.symbols$Price[is.opt] * contract.multiplier
+  prices.for.symbols$Price[is.opt] <- round(
+    prices.for.symbols$Price[is.opt] * contract.multiplier, CALC_FRAC_DIGITS)
   
   prices.for.symbols
 }
@@ -40,10 +46,11 @@ adjust.for.schwab.corporate.actions <- function(tx) {
     stopifnot(nrow(rev.split.orig.symbols[
       rev.split.orig.symbols$Date == rev.split.new.symbols$Date[i]
       & -rev.split.orig.symbols$Quantity == orig.quantity, ]) > 0)
-    tx$Quantity[is.pre.split] <- (
-      tx$Quantity[is.pre.split] * rev.split.new.symbols$Quantity[i] / orig.quantity)
-    tx$Price[is.pre.split] <- (
-      tx$Price[is.pre.split] * orig.quantity / rev.split.new.symbols$Quantity[i])
+    tx$Quantity[is.pre.split] <- round(
+      tx$Quantity[is.pre.split] * rev.split.new.symbols$Quantity[i] / orig.quantity,
+      CALC_FRAC_DIGITS)
+    tx$Price[is.pre.split] <- round(
+      tx$Price[is.pre.split] * orig.quantity / rev.split.new.symbols$Quantity[i], CALC_FRAC_DIGITS)
   }
   tx <- tx[tx$Action != "Reverse Split", ]
   
@@ -103,7 +110,7 @@ append.contra.tx <- function(tx) {
     #  rounding error as a fee rather than sneaking it into the cash contra transaction to make sure
     #  changes in cash costs are exactly equal and opposite to changes in securities costs.
     fees.and.comm$Amount <- round(
-      fees.and.comm$Quantity * fees.and.comm$Price + fees.and.comm$Amount, 4)
+      fees.and.comm$Quantity * fees.and.comm$Price + fees.and.comm$Amount, CALC_FRAC_DIGITS)
     fees.and.comm <- fees.and.comm[fees.and.comm$Amount != 0, ]
     fees.and.comm$Quantity <- fees.and.comm$Amount
     fees.and.comm$Reference.Symbol <- fees.and.comm$Symbol
@@ -116,7 +123,7 @@ append.contra.tx <- function(tx) {
     # Fees impact the value of cash positions but not the cost of cash positions. Contra
     #  transactions impact both the value and the cost of cash positions. Fee transactions are
     #  distinguished from contra transactions by the presence of a non-empty reference symbol.
-    contra.tx$Amount <- round(-contra.tx$Quantity * contra.tx$Price, 4)
+    contra.tx$Amount <- round(-contra.tx$Quantity * contra.tx$Price, CALC_FRAC_DIGITS)
     contra.tx$Quantity <- contra.tx$Amount
     contra.tx$Symbol <- "$"
     contra.tx$Price <- 1
@@ -484,7 +491,7 @@ load.netbenefits.transactions <- function(directory, brokeragelink.settle.lag=1)
   tx <- tx[
     !(tx$Action %in% c("Transfer", "REALIZED G/L")),
     c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
-  tx$Price <- round(tx$Price, 4)
+  tx$Price <- round(tx$Price, PX_FRAC_DIGITS)
   
   tx
 }

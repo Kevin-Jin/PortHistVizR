@@ -191,7 +191,7 @@ get.portfolio.summary.table <- function(agg.tx.tables) {
     c(
       "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Dividends.Minus.Fees", "Unit.Value",
       "Value", "Gain", "Day.Over.Day.Gain"),
-    digits=4)
+    digits=PX_FRAC_DIGITS)
   portfolio.summary <- portfolio.summary %>% formatPercentage(
     c("Cost.Pct.Drawdown", "Value.Pct.Drawdown"), 2)
   portfolio.summary <- set.full.page.sizing.policy(portfolio.summary)
@@ -223,7 +223,7 @@ get.interactive.price.vs.time.plot <- function(agg.tx.tables, symbol, arearange=
         title=list(text="Price"), opposite=TRUE, linkedTo=0,
         labels=list(formatter=JS(sprintf(
           "function() { return Highcharts.numberFormat((1 - this.value / 100) * %.17g, 2); }",
-          tx$peak.price)))))
+          round(tx$peak.price, CALC_FRAC_DIGITS))))))
   } else {
     hc <- hc %>% hc_yAxis_multiples(
       list(title=list(text="Price")),
@@ -231,7 +231,7 @@ get.interactive.price.vs.time.plot <- function(agg.tx.tables, symbol, arearange=
         title=list(text="Pct.Drawdown"), opposite=TRUE, linkedTo=0,
         labels=list(formatter=JS(sprintf(
           "function() { return Highcharts.numberFormat(100 * (1 - this.value / %.17g), 2); }",
-          tx$peak.price)))))
+          round(tx$peak.price, CALC_FRAC_DIGITS))))))
   }
   
   data.labels <- list(
@@ -294,7 +294,7 @@ get.interactive.size.vs.price.plot <- function(agg.tx.tables, symbol, tick.size=
   size.vs.price <- size.vs.price[, c("Pct.Drawdown", "Cost", "Cum.Cost", "Quantity")]
   size.vs.price <- size.vs.price[size.vs.price$Quantity != 0, ]
   size.vs.price$Price <- size.vs.price$Cost / size.vs.price$Quantity
-  peak.price <- sum(size.vs.price$Price) / sum(1 - size.vs.price$Pct.Drawdown / 100)
+  peak.price <- get.peak.price.from.pct.drawdown(size.vs.price)
   unit.value <- agg.tx.tables$unit.values[[symbol]]
   current.pct.drawdown <- 100 * (1 - unit.value / peak.price)
   unit.cost <- agg.tx.tables$unit.costs[[symbol]]
@@ -313,8 +313,8 @@ get.interactive.size.vs.price.plot <- function(agg.tx.tables, symbol, tick.size=
   # There is no counterpart to trunc for rounding away from 0, so roll our own implementation.
   size.vs.price$Price <- ifelse(
     size.vs.price$Quantity < 0,
-    floor(round(size.vs.price$Price * (1 / tick.size), 4)) / (1 / tick.size),
-    ceiling(round(size.vs.price$Price * (1 / tick.size), 4)) / (1 / tick.size))
+    floor(round(size.vs.price$Price * (1 / tick.size), PX_FRAC_DIGITS)) / (1 / tick.size),
+    ceiling(round(size.vs.price$Price * (1 / tick.size), PX_FRAC_DIGITS)) / (1 / tick.size))
   # Double check that we didn't round any already tick-aligned price or a price to the wrong
   #  direction.
   if (nrow(size.vs.price) != 0) {
@@ -322,7 +322,7 @@ get.interactive.size.vs.price.plot <- function(agg.tx.tables, symbol, tick.size=
       range(c(
         (size.vs.price$Price - size.vs.price$Raw.Price)[size.vs.price$Quantity > 0],
         (size.vs.price$Raw.Price - size.vs.price$Price)[size.vs.price$Quantity < 0])),
-      4)
+      PX_FRAC_DIGITS)
     stopifnot(round.off.range[1] >= 0 && round.off.range[2] < tick.size)
     size.vs.price <- reduce.on.factor(size.vs.price, "Price", function(for.price)
       data.frame(
@@ -399,7 +399,7 @@ get.interactive.size.vs.time.plot <- function(
   # All series are hidden initially to cut down on browser rendering time on page load.
   # Users are expected to manually toggle the size vs. time plots they're interested in.
   costs <- agg.tx.tables$size.vs.time.tables[[symbol]]
-  costs$Gain <- costs$Value - costs$Cost
+  costs$Gain <- round(costs$Value - costs$Cost, CALC_FRAC_DIGITS)
   costs$Cum.Quantity <- round(cumsum(costs$Quantity), QTY_FRAC_DIGITS)
   
   hc <- highchart() %>%
@@ -449,7 +449,7 @@ get.interactive.size.vs.time.plot <- function(
       data=data.frame(
         x=datetime_to_timestamp(costs$Date),
         y=costs$Gain,
-        DayOverDayGain=diff(c(0, costs$Gain))),
+        DayOverDayGain=round(diff(c(0, costs$Gain)), CALC_FRAC_DIGITS)),
       marker=list(symbol="diamond", radius=2),
       color=colors$yellow,
       type="area",
@@ -527,6 +527,7 @@ get.interactive.option.payoff.plot <- function(agg.tx.tables, options.for.root, 
   
   tx <- agg.tx.tables$portfolio.size.snapshot
   tx <- tx[tx$Symbol %in% options.for.root, ]
+  # TODO: keep zero quantity options if other options for the same expiry have non-zero quantity.
   tx <- tx[tx$Quantity != 0, c("Symbol", "Quantity", "Cost", "Value")]
   # Each option has a 100x contract multiplier.
   claim.type.mapping <- data.frame(Letter=c("C", "P"), Slope=c(+100, -100), stringsAsFactors=FALSE)
