@@ -218,17 +218,17 @@ get.interactive.price.vs.time.plot <- function(agg.tx.tables, symbol, arearange=
   
   if (pct.drawdown.major) {
     hc <- hc %>% hc_yAxis_multiples(
-      list(title=list(text="Pct.Drawdown"), reversed=TRUE),
+      list(title=list(text="Pct.Drawdown"), lineWidth=1, lineColor=colors$green, tickWidth=1, tickColor=colors$green, reversed=TRUE),
       list(
-        title=list(text="Price"), opposite=TRUE, linkedTo=0,
+        title=list(text="Price"), lineWidth=1, lineColor=colors$green, tickWidth=1, tickColor=colors$green, opposite=TRUE, linkedTo=0,
         labels=list(formatter=JS(sprintf(
           "function() { return Highcharts.numberFormat((1 - this.value / 100) * %.17g, 2); }",
           round(tx$peak.price, CALC_FRAC_DIGITS))))))
   } else {
     hc <- hc %>% hc_yAxis_multiples(
-      list(title=list(text="Price")),
+      list(title=list(text="Price"), lineWidth=1, lineColor=colors$green, tickWidth=1, tickColor=colors$green),
       list(
-        title=list(text="Pct.Drawdown"), opposite=TRUE, linkedTo=0,
+        title=list(text="Pct.Drawdown"), lineWidth=1, lineColor=colors$green, tickWidth=1, tickColor=colors$green, opposite=TRUE, linkedTo=0,
         labels=list(formatter=JS(sprintf(
           "function() { return Highcharts.numberFormat(100 * (1 - this.value / %.17g), 2); }",
           round(tx$peak.price, CALC_FRAC_DIGITS))))))
@@ -349,7 +349,7 @@ get.interactive.size.vs.price.plot <- function(agg.tx.tables, symbol, tick.size=
       borderColor=colors$blue) %>%
     hc_xAxis(title=list(text="Pct.Drawdown"), gridLineWidth=1) %>%
     hc_yAxis_multiples(
-      list(title=list(text="Cost")), list(title=list(text="Cost"), opposite=TRUE, linkedTo=0))
+      list(title=list(text="Cost"), lineWidth=1, lineColor=colors$blue, tickWidth=1, tickColor=colors$blue), list(title=list(text="Cost"), lineWidth=1, lineColor=colors$blue, tickWidth=1, tickColor=colors$blue, opposite=TRUE, linkedTo=0))
   
   hc <- hc %>%
     hc_add_series(
@@ -431,7 +431,7 @@ get.interactive.size.vs.time.plot <- function(
     hc_tooltip(shared=TRUE, valueDecimals=2, borderColor=colors$blue) %>%
     hc_xAxis(title=list(text="Date"), type="datetime", gridLineWidth=1) %>%
     hc_yAxis_multiples(
-      list(title=list(text="Position Size")), list(title=list(text="Gain"), opposite=TRUE))
+      list(title=list(text="Position Size"), lineWidth=1, lineColor=colors$green, tickWidth=1, tickColor=colors$green), list(title=list(text="Gain"), lineWidth=1, lineColor=colors$yellow, tickWidth=1, tickColor=colors$yellow, opposite=TRUE))
   
   # Dummy series with no data just for the sake of a legend entry with special handling.
   hc <- hc %>%
