@@ -256,7 +256,7 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
   distribution.actions <- c("DIVIDEND RECEIVED", "LONG-TERM CAP GAIN", "SHORT-TERM CAP GAIN")
   cash.actions <- c(
     distribution.actions, "ROTH CONVERSION", "ROLLOVER", "JOURNALED JNL VS A/C TYPES",
-    "TRANSFERRED FROM TO BROKERAGE OPTION", "TRANSFERRED TO OTHER PLAN OPTION")
+    "TRANSFERRED FROM TO BROKERAGE OPTION", "TRANSFERRED TO OTHER PLAN OPTION", "INTEREST EARNED")
   
   # Fidelity limits the date range in each file to one quarter, so we need to join the older files
   #  to the most recent files to get the full history.
