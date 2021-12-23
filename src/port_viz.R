@@ -19,11 +19,14 @@ source("src/interactive_plotters.R")
 
 port.viz <- function(
     transaction.file.loaders, price.file.loaders=list(), interesting.symbols=NULL,
-    portfolio.name=NULL, alpha.vantage.key=NULL, day.lag=0, from.date=as.Date("0001-01-01"),
+    portfolio.name=NULL, alpha.vantage.key=NULL, tiingo.key=NULL, day.lag=0, from.date=as.Date("0001-01-01"),
     to.date=as.Date("9999-12-31"), obfuscate.cost=FALSE, target.net.pct.drawdown=30,
     target.portfolio.net.cost=120000, static=FALSE) {
   if (!is.null(alpha.vantage.key)) {
     refresh.alphavantage.prices(transaction.file.loaders, alpha.vantage.key, day.lag)
+  }
+  if (!is.null(tiingo.key)) {
+    refresh.tiingo.prices(transaction.file.loaders, tiingo.key, day.lag)
   }
   
   print(Sys.time())

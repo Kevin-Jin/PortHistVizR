@@ -564,6 +564,52 @@ load.alphavantage.prices <- function(directory, fallback) {
   create.price.provider.with.overrides(price.overrides, fallback)
 }
 
+load.tiingo.prices <- function(directory, fallback) {
+  price.overrides <- NULL
+  for (file in list.files(directory)) {
+    stopifnot(endsWith(file, ".csv"))
+    symbol <- substr(file, 1, nchar(file) - 4)
+    for.symbol <- read.csv(file.path(directory, file), stringsAsFactors=FALSE)
+    for.symbol$date <- (
+      if (is.null(for.symbol$date)) NULL else as.Date(for.symbol$date))
+    # Calculate our own adjusted close that only takes into account splits and stock dividends, but
+    #  not cash dividends. Otherwise there will be discrepancies between cost (prices of past
+    #  transactions, see adjust.for.schwab.corporate.actions) and value (prices today). Cash
+    #  dividends are accounted for as cash transactions in the portfolio, so we want to avoid double
+    #  counting them.
+    corp.actions <- which(for.symbol$splitFactor != 1)
+    corp.actions <- corp.actions[corp.actions != nrow(for.symbol)]
+    for (corp.action in corp.actions) {
+      if (corp.action == 1) {
+        next
+      }
+      past.indices <- 1:(corp.action - 1)
+      for.symbol$close[past.indices] <- (
+        for.symbol$close[past.indices] / for.symbol$splitFactor[corp.action])
+      for.symbol$high[past.indices] <- (
+        for.symbol$high[past.indices] / for.symbol$splitFactor[corp.action])
+      for.symbol$low[past.indices] <- (
+        for.symbol$low[past.indices] / for.symbol$splitFactor[corp.action])
+    }
+    
+    if (nrow(for.symbol) > 0) {
+      colname.mapping <- rbind(
+        c("date", "Date"), c("high", "High"), c("low", "Low"), c("close", "Close"))
+      # Tiingo doesn't have prices for index option underlyers, e.g. SPX, VIX, NDX, RUT.
+      # The current recommended way to avoid price download attempts on every call to
+      # refresh.tiingo.prices is to create a CSV file in directory containing rows for
+      # 0001-01-01 and 9999-12-31. Only a date column should be required for these stub CSVs.
+      for.symbol[, colname.mapping[!(colname.mapping[, 1] %in% colnames(for.symbol)), 1]] <- NA
+      for.symbol <- for.symbol[, colname.mapping[, 1]]
+      colnames(for.symbol) <- colname.mapping[, 2]
+      price.overrides <- rbind(
+        price.overrides, cbind(Symbol=symbol, for.symbol, stringsAsFactors=FALSE))
+    }
+  }
+  
+  create.price.provider.with.overrides(price.overrides, fallback)
+}
+
 load.simple.prices <- function(override.file, fallback) {
   price.overrides <- read.csv(override.file, stringsAsFactors=FALSE)
   stopifnot(is.character(price.overrides$Symbol))
@@ -685,6 +731,120 @@ refresh.alphavantage.prices <- function(
     minute.window <- tail(download.times, requests.per.minute)
     if (length(minute.window) >= requests.per.minute && head(minute.window, 1) - (now - 60) >= 0) {
       Sys.sleep(head(minute.window, 1) - (now - 60))
+    }
+  }
+}
+
+
+refresh.tiingo.prices <- function(
+    transaction.file.loaders, tiingo.key, day.lag=0, exch.tzone="America/New_York",
+    # US exchanges close at 16:00 America/New_York, but allow 90 minutes for Tiingo to
+    #  disseminate the official closing auction prices.
+    exch.close=c(17, 30), output.folder=file.path("input", "tiingo"), requests.per.hour=500,
+    requests.per.day=20000) {
+  tx <- do.call(rbind, lapply(
+    names(transaction.file.loaders),
+    function(file.name) transaction.file.loaders[[file.name]](file.name)))
+  tx <- join.cost(tx)
+  tx.by.symbol <- reduce.on.factor(tx, "Symbol", function(tx.for.symbol) data.frame(
+    Cost=sum(tx.for.symbol$Cost),
+    First.Date=min(tx.for.symbol$Date),
+    Last.Date=max(tx.for.symbol$Date),
+    Quantity=round(sum(tx.for.symbol$Quantity), QTY_FRAC_DIGITS)))
+  
+  # Make sure that options positions don't "net out" with stock positions on the underlying by
+  #  quantity. We still want to download the prices for the stock in that case, and we don't care
+  #  about what quantity is other than whether it's non-zero.
+  tx.by.symbol$Cost <- abs(tx.by.symbol$Cost)
+  tx.by.symbol$Quantity <- abs(tx.by.symbol$Quantity)
+  # Even if we don't own shares of the underlying, we still want to download spot for options.
+  options.tx <- tx.by.symbol[is.options.symbol(tx.by.symbol$Symbol), ]
+  options.tx$Symbol <- sub("\\s+$", "", substr(options.tx$Symbol, 1, 6))
+  # TODO: figure out how to map index roots to Tiingo symbols.
+  tx.by.symbol <- rbind(tx.by.symbol[!is.options.symbol(tx.by.symbol$Symbol), ], options.tx)
+  # The first reduce finds where quantity netted out to zero within options and stocks individually.
+  #  Now we combine the gross quantities of the individual options and stocks.
+  tx.by.symbol <- reduce.on.factor(tx.by.symbol, "Symbol", function(tx.for.symbol) data.frame(
+    Cost=sum(tx.for.symbol$Cost),
+    First.Date=min(tx.for.symbol$First.Date),
+    Last.Date=max(tx.for.symbol$Last.Date),
+    Quantity=round(sum(tx.for.symbol$Quantity), QTY_FRAC_DIGITS)))
+  
+  ordered.symbols <- tx.by.symbol$Symbol[order(tx.by.symbol$Cost, decreasing=TRUE)]
+  ordered.symbols <- ordered.symbols[!is.options.symbol(ordered.symbols) & ordered.symbols != "$"]
+  
+  dir.create(output.folder, showWarnings=FALSE)
+  download.times <- NULL
+  for (symbol in ordered.symbols) {
+    tx.last.date <- tx.by.symbol$Last.Date[tx.by.symbol$Symbol == symbol]
+    tx.first.date <- tx.by.symbol$First.Date[tx.by.symbol$Symbol == symbol]
+    if (tx.by.symbol$Quantity[tx.by.symbol$Symbol == symbol] != 0) {
+      tx.last.date <- Sys.Date()
+    }
+    
+    file.name <- file.path(output.folder, sprintf("%s.csv", symbol))
+    if (file.exists(file.name)) {
+      # TODO: read last-modified timestamps from existing files for cooldown.
+      now <- Sys.time()
+      attr(now, "tzone") <- exch.tzone
+      now <- as.POSIXlt(now)
+      # Tiingo publishes mutual funds NAVs at midnight.
+      now$mday <- now$mday - day.lag
+      now <- as.POSIXct(now)
+      
+      prices <- read.csv(file.name, stringsAsFactors=FALSE)
+      existing.price.dates <- if (is.null(prices$date)) NULL else as.Date(prices$date)
+      if (length(existing.price.dates) > 0) {
+        px.last.date <- max(existing.price.dates)
+        px.first.date <- min(existing.price.dates)
+        
+        # Tiingo doesn't have prices for index option underlyers, e.g. SPX, VIX, NDX, RUT.
+        # The current recommended way to avoid price download attempts on every call to
+        # refresh.alphavantage.prices is to create a CSV file in directory containing rows for
+        # 0001-01-01 and 9999-12-31. Make sure px.last.date doesn't overflow into year 10000 since R
+        # can't parse that year.
+        if (px.last.date != as.Date("9999-12-31")) {
+          px.next.date <- px.last.date + 1
+          while (!isBizday(as.timeDate(px.next.date), holidayNYSE())) {
+            px.next.date <- px.next.date + 1
+          }
+        }
+        px.next.time <- as.POSIXct(format(px.next.date))
+        attr(px.next.time, "tzone") <- exch.tzone
+        px.next.time <- as.POSIXlt(px.next.time)
+        px.next.time$hour <- exch.close[1]
+        px.next.time$min <- exch.close[2]
+        px.next.time <- as.POSIXct(px.next.time)
+        
+        # If the existing file has prices before this account's first transaction date on the
+        # symbol or prices after this account's last transaction date on the symbol, make sure to
+        # save refreshed prices for those dates as well. This can happen if running PHVR on multiple
+        # accounts that have had positions on the same symbol at different points in time.
+        tx.first.date <- min(px.first.date, tx.first.date)
+        tx.last.date <- max(px.last.date, tx.last.date)
+        
+        if ((px.next.time > now || px.last.date >= tx.last.date)
+            && px.first.date <= tx.first.date) {
+          print(paste(Sys.time(), "-", symbol, "- prices are already up to date"))
+          next
+        }
+      }
+    }
+    
+    print(paste(Sys.time(), "-", symbol, "- downloading prices"))
+    prices <- read.csv(sprintf(
+      "https://api.tiingo.com/tiingo/daily/%s/prices?token=%s&startDate=%s&endDate=%s&format=csv",
+      symbol, tiingo.key, tx.first.date, tx.last.date))
+    existing.price.dates <- if (is.null(prices$date)) NULL else as.Date(prices$date)
+    prices <- prices[existing.price.dates >= tx.first.date & existing.price.dates <= tx.last.date, ]
+    write.csv(prices, file.name, row.names=FALSE)
+    
+    now <- as.numeric(Sys.time())
+    download.times <- tail(c(download.times, now), max(requests.per.hour, requests.per.day))
+    download.times <- download.times[download.times >= now - 60 * 60 * 24]
+    hour.window <- tail(download.times, requests.per.hour)
+    if (length(hour.window) >= requests.per.hour && head(hour.window, 1) - (now - 60 * 60) >= 0) {
+      Sys.sleep(head(hour.window, 1) - (now - 60 * 60))
     }
   }
 }
