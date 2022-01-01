@@ -146,7 +146,8 @@ load.schwab.transactions <- function(export.file) {
       -1, -1, -1, -1,
       +1, +1, +1, +1, +1))
   cash.actions <- c(
-    "MoneyLink Transfer", "Bank Interest", "Cash Dividend", "Pr Yr Cash Div", "Service Fee")
+    "MoneyLink Transfer", "Bank Interest", "Cash Dividend", "Pr Yr Cash Div", "Service Fee",
+    "Long Term Cap Gain", "Short Term Cap Gain")
   
   tx <- read.csv(export.file, skip=1, stringsAsFactors=FALSE, check.names=FALSE)
   stopifnot(tail(tx$Date, 1) == "Transactions Total")
@@ -168,7 +169,11 @@ load.schwab.transactions <- function(export.file) {
   tx$`Fees & Comm` <- as.numeric(gsub("^(-?)\\$", "\\1", tx$`Fees & Comm`))
   tx$Amount <- as.numeric(gsub("^(-?)\\$", "\\1", tx$Amount))
   
-  tx$Reference.Symbol <- ifelse(tx$Action %in% c("Cash Dividend", "Pr Yr Cash Div"), tx$Symbol, "")
+  tx$Reference.Symbol <- ifelse(
+    tx$Action %in% c(
+      "Cash Dividend", "Pr Yr Cash Div", "Long Term Cap Gain", "Short Term Cap Gain"),
+    tx$Symbol,
+    "")
   tx$Reference.Symbol[tx$Action == "Bank Interest"] <- "$"
   tx$Reference.Symbol[tx$Action == "Service Fee"] <- tx$Description[tx$Action == "Service Fee"]
   borrow.fee.matches <- regexpr("^STOCK BORROW FEE/(.+)$", tx$Reference.Symbol, perl=TRUE)
