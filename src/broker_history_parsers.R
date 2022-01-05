@@ -253,6 +253,15 @@ normalize.fidelity.option.expirations <- function(tx.part) {
   tx.part
 }
 
+find.fidelity.wash.transaction <- function(tx.part) {
+  tx.part.negated <- tx.part
+  tx.part.negated$Amount <- -tx.part.negated$Amount
+  tx.part.negated$Wash.Row.Num <- 1:nrow(tx.part.negated)
+  tx.part$Row.Num <- 1:nrow(tx.part)
+  tx.part <- merge(tx.part[, c("Date", "Symbol", "Amount", "Row.Num")], tx.part.negated[, c("Date", "Symbol", "Amount", "Wash.Row.Num")], c("Date", "Symbol", "Amount"), all.x=TRUE)
+  tx.part[order(tx.part$Row.Num), ]$Wash.Row.Num
+}
+
 # TODO: treat any money market mutual fund (five character symbol, ends with XX) as core position?
 load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRXX")) {
   security.actions <- data.frame(
@@ -311,6 +320,13 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
     
     stopifnot(all(tx.part$Symbol != "$"))
     tx.part <- normalize.fidelity.option.expirations(tx.part)
+    # Sometimes Fidelity restates the reinvestment price at a later date. The amount washes out but
+    # the price and quantity change. This is the only time a reinvestment transaction can have a
+    # negative quantity.
+    is.restated.reinvestment <- (
+      tx.part$Quantity < 0
+      & grepl("^REINVESTMENT", tx.part$Action)
+      & !is.na(find.fidelity.wash.transaction(tx.part)))
     stopifnot(all(is.na(tx.part$Price) == is.na(tx.part$Quantity)))
     stopifnot(all(grepl(
       paste("^(", paste(cash.actions, collapse="|"), ")", sep=""),
@@ -322,9 +338,15 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
     stopifnot(all(grepl(
       paste(
         "^(", paste(security.actions$Action[security.actions$Sign < 0], collapse="|"), ")", sep=""),
-      tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity < 0])))
-    stopifnot(all(tx.part$Symbol[startsWith(tx.part$Action, "REINVESTMENT")] %in% core.position))
+      tx.part$Action[!is.na(tx.part$Quantity) & tx.part$Quantity < 0 & !is.restated.reinvestment])))
     tx.part <- normalize.cash.transactions(tx.part)
+    # The only cash transactions left that didn't have their symbol changed from core.position to
+    # "$" are reinvestment transactions since they have non-zero quantity. Remove them because we
+    # don't want to wash out the increase to the cash position value from the corresponding dividend
+    # transaction. The cash position cost will never be increased since append.contra.tx skips cash.
+    # Leave in the reinvestment transactions for dividends on non cash positions (and treat it
+    # exactly the same as a buy transaction) so that we increase the cost of the position to exactly
+    # wash out the cost decrease by the dividend as well as increase the quantity of the position.
     stopifnot(all(startsWith(tx.part$Action[tx.part$Symbol %in% core.position], "REINVESTMENT")))
     tx.part <- tx.part[!(tx.part$Symbol %in% core.position), ]
     tx.part <- adjust.for.fidelity.corporate.actions(tx.part)
