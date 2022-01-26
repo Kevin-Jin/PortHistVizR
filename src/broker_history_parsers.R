@@ -236,19 +236,35 @@ normalize.fidelity.option.symbol <- function(tx.part) {
 }
 
 normalize.fidelity.option.expirations <- function(tx.part) {
-  expired.tx <- grepl("^EXPIRED", tx.part$Action)
+  expired.tx <- grepl("^(EXPIRED|ASSIGNED)", tx.part$Action)
   stopifnot(all(!is.na(tx.part$Quantity[expired.tx])))
   stopifnot(all(is.na(tx.part[expired.tx, c("Price", "Amount")])))
   tx.part[expired.tx, c("Price", "Amount")] <- 0
   
+  tx.part
+}
+
+parse.fidelity.backdates <- function(tx.part, actions) {
+  actions.tx <- grepl(paste("^(", paste(actions, collapse="|"), ")", sep=""), tx.part$Action)
+
   as.of.matches <- regexpr(
-    "as of (\\d{2}/\\d{2}/\\d{4})", tx.part$Action[expired.tx], perl=TRUE)
-  matched.actions <- tx.part$Action[expired.tx][as.of.matches != -1]
+    "as of (\\d{2}/\\d{2}/\\d{4})", tx.part$Action[actions.tx], perl=TRUE)
+  matched.actions <- tx.part$Action[actions.tx][as.of.matches != -1]
   capture.start <- attr(as.of.matches, "capture.start")[as.of.matches != -1, , drop=FALSE]
   capture.stop <- capture.start + attr(
     as.of.matches, "capture.length")[as.of.matches != -1, , drop=FALSE] - 1
   as.of.dates <- substr(matched.actions, capture.start[, 1], capture.stop[, 1])
-  tx.part$Date[expired.tx][as.of.matches != -1] <- as.Date(as.of.dates, "%m/%d/%Y")
+  tx.part$Date[actions.tx][as.of.matches != -1] <- as.Date(as.of.dates, "%m/%d/%Y")
+  
+  # Assigned and buy cancel actions have a different format.
+  as.of.matches <- regexpr(
+    "AS OF (\\d{2}-\\d{2}-\\d{2})", tx.part$Action[actions.tx], perl=TRUE)
+  matched.actions <- tx.part$Action[actions.tx][as.of.matches != -1]
+  capture.start <- attr(as.of.matches, "capture.start")[as.of.matches != -1, , drop=FALSE]
+  capture.stop <- capture.start + attr(
+    as.of.matches, "capture.length")[as.of.matches != -1, , drop=FALSE] - 1
+  as.of.dates <- substr(matched.actions, capture.start[, 1], capture.stop[, 1])
+  tx.part$Date[actions.tx][as.of.matches != -1] <- as.Date(as.of.dates, "%m-%d-%y")
   
   tx.part
 }
@@ -265,8 +281,8 @@ find.fidelity.wash.transaction <- function(tx.part) {
 # TODO: treat any money market mutual fund (five character symbol, ends with XX) as core position?
 load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRXX")) {
   security.actions <- data.frame(
-    Action=c("YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED"),
-    Sign=c(+1, +1, -1, -1))
+    Action=c("YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED", "ASSIGNED", "BUY CANCEL"),
+    Sign=c(+1, +1, -1, -1, +1, -1))
   distribution.actions <- c("DIVIDEND RECEIVED", "LONG-TERM CAP GAIN", "SHORT-TERM CAP GAIN")
   cash.actions <- c(
     distribution.actions, "ROTH CONVERSION", "ROLLOVER", "JOURNALED JNL VS A/C TYPES",
@@ -327,6 +343,8 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
       tx.part$Quantity < 0
       & grepl("^REINVESTMENT", tx.part$Action)
       & !is.na(find.fidelity.wash.transaction(tx.part)))
+    tx.part$Run.Date <- tx.part$Date
+    tx.part <- parse.fidelity.backdates(tx.part, c(security.actions$Action, distribution.actions, cash.actions))
     stopifnot(all(is.na(tx.part$Price) == is.na(tx.part$Quantity)))
     stopifnot(all(grepl(
       paste("^(", paste(cash.actions, collapse="|"), ")", sep=""),
@@ -384,29 +402,32 @@ load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRX
       )
       >= 0
     )
-    tx.part <- tx.part[, c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
     
     # Make tx.part and tx disjoint.
-    overlap <- tx.part$Date[tx.part$Date %in% tx$Date]
+    # Backdated actions in a later part can cross over into an earlier part, so use the run date
+    #  rather than the backdate to determine overlaps.
+    overlap <- tx.part$Run.Date[tx.part$Run.Date %in% tx$Run.Date]
     if (length(overlap) > 0) {
-      overlap.tx.part <- tx.part[tx.part$Date %in% overlap, ]
+      overlap.tx.part <- tx.part[tx.part$Run.Date %in% overlap, ]
       rownames(overlap.tx.part) <- NULL
-      overlap.tx <- tx[tx$Date %in% overlap, ]
+      overlap.tx <- tx[tx$Run.Date %in% overlap, ]
       rownames(overlap.tx) <- NULL
       stopifnot(identical(overlap.tx.part, overlap.tx))
-      tx.part <- tx.part[!(tx.part$Date %in% overlap), ]
+      tx.part <- tx.part[!(tx.part$Run.Date %in% overlap), ]
     }
     
     # Splicing a tx.part into the middle of tx isn't currently supported, so the sorted transaction
     #  file names better be in the same order as the contained dates.
-    is.earlier.part <- max(tx.part$Date) < min(tx$Date, as.Date("9999-12-31"))
-    is.later.part <- min(tx.part$Date) > max(tx$Date, as.Date("0001-01-01"))
+    is.earlier.part <- max(tx.part$Run.Date) < min(tx$Run.Date, as.Date("9999-12-31"))
+    is.later.part <- min(tx.part$Run.Date) > max(tx$Run.Date, as.Date("0001-01-01"))
     stopifnot(is.earlier.part || is.later.part)
     if (is.earlier.part)
       tx <- rbind(tx, tx.part)
     else
       tx <- rbind(tx.part, tx)
   }
+  
+  tx <- tx[, c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
   tx
 }
 
