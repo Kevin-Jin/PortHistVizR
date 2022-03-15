@@ -443,7 +443,7 @@ load.netbenefits.transactions <- function(directory, brokeragelink.settle.lag=1)
   tx$Amount <- as.numeric(gsub(",", "", tx$Amount))
   tx$Price <- tx$Amount / tx$Quantity
   stopifnot(all(tx[tx$Action == "Transfer", c("Quantity", "Amount")] == 0))
-  stopifnot(all(tx[tx$Action == "REALIZED G/L", c("Quantity")] == 0))
+  stopifnot(all(tx[tx$Action %in% c("REALIZED G/L", "Realized Gain/Loss"), c("Quantity")] == 0))
   
   # Caller should also be calling load.fidelity.transactions on BrokerageLink history and
   #  concatenating the result to this call's result. The BrokerageLink history will have the cash
@@ -509,7 +509,7 @@ load.netbenefits.transactions <- function(directory, brokeragelink.settle.lag=1)
   #  increases since we're technically buying more of the symbol. Split up the dividend reinvestment
   #  into a cash inflow, a purchase, and a cash outflow contra to the purchase.
   tx$Row.Order <- seq_len(nrow(tx))
-  dividends <- tx[tx$Action == "DIVIDEND", ]
+  dividends <- tx[tx$Action %in% c("DIVIDEND", "Dividend"), ]
   if (nrow(dividends) != 0) {
     last.dividend.row <- 0
     new.tx <- NULL
@@ -537,7 +537,7 @@ load.netbenefits.transactions <- function(directory, brokeragelink.settle.lag=1)
   }
   
   tx <- tx[
-    !(tx$Action %in% c("Transfer", "REALIZED G/L")),
+    !(tx$Action %in% c("Transfer", "REALIZED G/L", "Realized Gain/Loss")),
     c("Date", "Symbol", "Quantity", "Price", "Reference.Symbol")]
   tx$Price <- round(tx$Price, PX_FRAC_DIGITS)
   
