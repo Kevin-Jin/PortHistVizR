@@ -188,11 +188,14 @@ calc.portfolio.size.snapshot <- function(
   
   agg.by.ref.sym <- reduce.on.factor(
     tx[tx$Reference.Symbol != "", ], "Reference.Symbol", function(tx.for.ref.sym) {
-      data.frame(Dividends.Minus.Fees=sum(tx.for.ref.sym$Quantity * tx.for.ref.sym$Price))
+      data.frame(
+        Dividends=sum(
+          (tx.for.ref.sym$Quantity * tx.for.ref.sym$Price)[tx.for.ref.sym$Quantity > 0]),
+        Fees=sum((tx.for.ref.sym$Quantity * tx.for.ref.sym$Price)[tx.for.ref.sym$Quantity < 0]))
     })
   if (is.null(agg.by.ref.sym)) {
     agg.by.ref.sym <- data.frame(
-      matrix(ncol=2, nrow=0, dimnames=list(NULL, c("Reference.Symbol", "Dividends.Minus.Fees"))))
+      matrix(ncol=3, nrow=0, dimnames=list(NULL, c("Reference.Symbol", "Dividends", "Fees"))))
   }
   agg.by.ref.sym <- agg.by.ref.sym[
     match(agg.by.symbol$Symbol, agg.by.ref.sym$Reference.Symbol),
@@ -218,7 +221,7 @@ group.options.and.total.in.portfolio.size.snapshot <- function(agg.by.symbol, mi
       Symbol=group.name,
       as.data.frame(t(colSums(
         agg.over[, c(
-          "Cost", "Full.Rebound.Gain", "Value", "Dividends.Minus.Fees", "Gain",
+          "Cost", "Full.Rebound.Gain", "Value", "Dividends", "Fees", "Gain",
           "Day.Over.Day.Gain")]))),
       stringsAsFactors=FALSE)
     fill.cols <- names(agg.over)[!(names(agg.over) %in% names(agg.portfolio))]

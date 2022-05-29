@@ -189,7 +189,7 @@ get.portfolio.summary.table <- function(agg.tx.tables) {
   
   portfolio.summary <- portfolio.summary %>% formatCurrency(
     c(
-      "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Dividends.Minus.Fees", "Unit.Value",
+      "Unit.Cost", "Cost", "Peak.Price", "Full.Rebound.Gain", "Dividends", "Fees", "Unit.Value",
       "Value", "Gain", "Day.Over.Day.Gain"),
     digits=PX_FRAC_DIGITS)
   portfolio.summary <- portfolio.summary %>% formatPercentage(
