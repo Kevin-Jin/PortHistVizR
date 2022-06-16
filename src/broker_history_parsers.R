@@ -163,6 +163,7 @@ load.schwab.transactions <- function(export.file) {
   # This happens if only small buys and sells below the fee threshold exist in the history.
   tx$`Fees & Comm`[is.na(tx$`Fees & Comm`)] <- ""
   tx <- normalize.schwab.option.symbol(tx)
+  tx$Quantity <- as.numeric(gsub(",", "", tx$Quantity))
   tx$Quantity <- security.actions$Sign[match(tx$Action, security.actions$Action)] * tx$Quantity
   tx$Price <- as.numeric(gsub("^(-?)\\$", "\\1", tx$Price))
   tx$`Fees & Comm`[tx$`Fees & Comm` == ""] <- "$0"
