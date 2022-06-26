@@ -40,15 +40,17 @@ port.viz <- function(
     names(price.file.loaders),
     recent.transaction.price.provider)
   dir.create("output", showWarnings=FALSE)
+  dir.create("cache", showWarnings=FALSE)
   file.name <- if (is.null(portfolio.name)) "PortViz" else sprintf("PortViz_%s", portfolio.name)
   
   if (static) {
     agg.tx.tables <- create.agg.tx.tables(
-      tx, price.provider, interesting.symbols, obfuscate.cost, target.net.pct.drawdown,
-      target.portfolio.net.cost)
+      tx, price.provider, interesting.symbols, file.path("cache", portfolio.name), obfuscate.cost,
+      target.net.pct.drawdown, target.portfolio.net.cost)
     plot.static(agg.tx.tables, file.path("output", sprintf("%s.pdf", file.name)))
   } else {
-    agg.tx.tables <- create.agg.tx.tables(tx, price.provider, interesting.symbols, obfuscate.cost)
+    agg.tx.tables <- create.agg.tx.tables(
+      tx, price.provider, interesting.symbols, file.path("cache", portfolio.name), obfuscate.cost)
     plot.interactive(agg.tx.tables, file.path("output", sprintf("%s.html", file.name)))
   }
   

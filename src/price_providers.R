@@ -25,12 +25,14 @@ recent.transaction.price.provider <- list(
     tx.for.date <- tx.for.date[
       tx.for.date$Reference.Symbol == "" & (tx.for.date$Quantity != 0 | tx.for.date$Price != 0), ]
     if (is.null(tx.for.date) || nrow(tx.for.date) == 0) NA else max(tx.for.date$Price)
-  })
+  },
+  dump=function() list(NULL))
 
 create.price.provider.with.overrides <- function(
     override.prices, fallback=recent.transaction.price.provider) {
   stopifnot(anyDuplicated(override.prices[, c("Date", "Symbol")]) == 0)
   
+  override.prices <- override.prices[, c("Symbol", "Date", "High", "Low", "Close")]
   # Convert the data.frame into environments to improve performance since data.frames do not support
   #  indexing.
   override.dates <- list2env(split(override.prices$Date, override.prices$Symbol))
@@ -70,5 +72,6 @@ create.price.provider.with.overrides <- function(
         NA
       else
         max(high.prices, na.rm=TRUE)
-    })
+    },
+    dump=function() rbind(override.prices, fallback$dump()))
 }

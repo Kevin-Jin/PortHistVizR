@@ -13,17 +13,131 @@ get.unit.cost <- function(tx, symbol) {
   sum(tx$Cost[tx$Symbol == symbol]) / sum(tx$Quantity[tx$Symbol == symbol])
 }
 
+# serialize.cache.structure <- function(struct, path) {
+#   if (is.data.frame(struct)) {
+#     write(
+#       sprintf("%s=[%s]", basename(path), paste(unlist(lapply(struct, class)), collapse=",")),
+#       file=file.path(dirname(path), "index"), append=TRUE)
+#     write.csv(struct, path, row.names=FALSE)
+#   } else if (is.atomic(struct)) {
+#     write(
+#       sprintf("%s=%s", basename(path), class(struct)),
+#       file=file.path(dirname(path), "index"), append=TRUE)
+#     write.table(struct, path, row.names=FALSE, col.names=FALSE)
+#   } else if (is.list(struct)) {
+#     dir.create(path, showWarnings=FALSE)
+#     el.names <- names(struct)
+#     # Check for conflicts with special names.
+#     stopifnot(
+#       sort(el.names) != sort(as.character(seq_len(length(struct)))) && !("index" %in% el.names))
+#     if (is.null(el.names)) {
+#       el.names <- as.character(seq_len(length(struct)))
+#       names(struct) <- el.names
+#     }
+#     file.create(file.path(path, "index"))
+#     for (el.name in el.names) {
+#       serialize.cache.structure(struct[[el.name]], file.path(path, el.name))
+#     }
+#   }
+# }
+
+get.schema.version <- function() {
+  script.source <- paste(
+    paste(readLines("src/transaction_aggregators.R"), collapse="\n"),
+    paste(readLines("src/aggregate_transactions_tables_cache.R"), collapse="\n"),
+    sep="\n")
+  digest(script.source, "md5", FALSE, raw=TRUE)
+}
+
+merge.tables <- function(incremental.tx, prev.agg.tx.tables) {
+  topologically.sorted.table.dependency.graph <- list(
+    interesting.options=function(incremental.tx, prev.agg.tx.tables, curr.agg.tx.tables) {
+      
+    },
+    interesting.stocks=function(incremental.tx, prev.agg.tx.tables, curr.agg.tx.tables) {
+      
+    },
+    price.vs.time.tables=function(incremental.tx, prev.agg.tx.tables, curr.agg.tx.tables) {
+      lapply.and.set.names(
+        curr.agg.tx.tables$interesting.stocks, function(symbol) calc.price.vs.time(incremental.tx, symbol))
+    }
+  )
+  curr.agg.tx.tables <- list()
+  for (table.name in names(topologically.sorted.table.dependency.graph)) {
+    curr.agg.tx.tables[table.name] <- dispatch[table.name](incremental.tx, prev.agg.tx.tables, curr.agg.tx.tables)
+  }
+}
+
 create.agg.tx.tables <- function(
     tx, price.provider=recent.transaction.price.provider, interesting.symbols=c(),
-    obfuscate.cost=FALSE, target.net.pct.drawdown=NULL, target.portfolio.net.cost=NULL) {
+    cache.path="cache", obfuscate.cost=FALSE, target.net.pct.drawdown=NULL,
+    target.portfolio.net.cost=NULL) {
+  symbols <- unique(tx$Symbol)
+  current.dates.by.symbol <- get.current.dates.by.symbol(symbols, price.provider)
+  current.date <- max(do.call(c, current.dates.by.symbol))
+  
+  version <- get.schema.version()
+  #version <- packBits(as.raw(c(1,1,1,1,0,0,1,1,0,1,1,0,0,0,0,0,0,1,0,0,1,1,0,0,1,1,1,0,0,0,0,1,0,0,1,1,0,1,0,0,1,1,1,0,1,0,0,0,0,0,1,1,1,1,0,0,0,0,0,1,0,1,1,1,1,0,0,0,1,0,1,1,1,1,0,1,0,0,0,0,0,1,0,0,1,0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,0,0,1,1,1,1,0,1,0,1,1,0,1,1,0,1,0,0,0,0)))
+  if (file.exists(cache.path)) {
+    all.prev.agg.tx.tables <- readRDS(cache.path)
+    all.prev.agg.tx.tables <- all.prev.agg.tx.tables[
+      unlist(lapply(all.prev.agg.tx.tables, function(prev.agg.tx.tables) (
+        prev.agg.tx.tables$version == version
+        && max(prev.agg.tx.tables$current.date, max(prev.agg.tx.tables$tx$Date))
+        < max(current.date, max(tx$Date))
+      )))
+    ]
+    all.prev.agg.tx.tables <- tail(all.prev.agg.tx.tables, 1)
+  } else {
+    all.prev.agg.tx.tables <- list()
+  }
+  
+  input.tx <- tx
+  if (length(all.prev.agg.tx.tables) != 0) {
+    prev.agg.tx.tables <- all.prev.agg.tx.tables[[1]]
+    prev.tx <- prev.agg.tx.tables$tx
+    our.prev.tx <- tx[tx$Date <= max(prev.tx$Date), ]
+    rownames(our.prev.tx) <- NULL
+    rownames(prev.tx) <- NULL
+    
+    prev.price.provider <- prev.agg.tx.tables$price.provider
+    our.prev.price.provider <- price.provider$dump()
+    # TODO: make sure max(prev.tx$Date) and max(prev.price.provider$Date) are consistent.
+    our.prev.price.provider <- our.prev.price.provider[
+      our.prev.price.provider$Date <= max(prev.price.provider$Date), ]
+    rownames(our.prev.price.provider) <- NULL
+    rownames(prev.price.provider) <- NULL
+    
+    if (
+      identical(prev.tx, our.prev.tx) && identical(prev.price.provider, our.prev.price.provider)
+    ) {
+      incremental.tx <- tx[tx$Date > max(prev.tx$Date), ]
+    } else {
+      prev.agg.tx.tables <- NULL
+      incremental.tx <- tx
+    }
+  } else {
+    prev.agg.tx.tables <- NULL
+    incremental.tx <- tx
+  }
+  
+  # TODO: if intermediate files exist, then load them and apply incremental updates from tx after
+  #  the as-of date for the intermediate files. If interesting.symbols change, regenerate
+  #  all of miscellaneous and introduce individual symbol tables for new interesting symbols.
+  
   is.interesting.option <- grepl(" options$", interesting.symbols)
   interesting.stocks <- interesting.symbols[!is.interesting.option]
   interesting.options <- group.interesting.options(tx, interesting.symbols, is.interesting.option)
-  symbols <- unique(tx$Symbol)
   
   tx <- coalesce.tx.by.date.symbol.price(tx)
   tx <- join.cost(tx)
   tx <- join.pct.drawdown(tx)
+  
+  # incremental.tx <- coalesce.tx.by.date.symbol.price(incremental.tx)
+  # incremental.tx <- join.cost(incremental.tx)
+  # prev.peak.prices <- lapply.and.set.names(names(prev.agg.tx.tables$size.vs.price.tables), function(symbol) prev.agg.tx.tables$size.vs.price.tables[[symbol]]$peak.price)
+  # incremental.tx <- join.pct.drawdown(incremental.tx, prev.peak.prices)
+  # TODO: use prev.agg.tx.tables$portfolio.size.snapshot and incremental.tx.
   if (obfuscate.cost) {
     tx.by.symbol <- reduce.on.factor(
       tx, "Symbol", function(tx.for.symbol) data.frame(Cost=sum(tx.for.symbol$Cost)))
@@ -41,13 +155,13 @@ create.agg.tx.tables <- function(
     interesting.stocks <- c()
   }
   
-  current.dates.by.symbol <- get.current.dates.by.symbol(symbols, price.provider)
-  current.date <- max(do.call(c, current.dates.by.symbol))
-  
   price.vs.time.tables <- lapply.and.set.names(
     interesting.stocks, function(symbol) calc.price.vs.time(tx, symbol))
   size.vs.price.tables <- lapply.and.set.names(
     interesting.stocks, function(symbol) calc.size.vs.price(tx, symbol, 0, FALSE))
+  size.vs.price.tables <- c(size.vs.price.tables, lapply.and.set.names(
+    symbols[!(symbols %in% interesting.stocks)],
+    function(symbol) list(peak.price=get.peak.price.from.pct.drawdown(tx))))
   
   # Size vs. time tables for options and miscellaneous stocks are not plotted directly, but are used
   #  as intermediate inputs to portfolio size vs. time tables and the portfolio size snapshot.
@@ -130,7 +244,8 @@ create.agg.tx.tables <- function(
       interesting.stocks, function(symbol) identify.tx.nearby(tx, symbol, unit.values[[symbol]]))
   }
   
-  list(
+  agg.tx.tables <- list(
+    version=version,
     interesting.options=interesting.options,
     interesting.stocks=interesting.stocks,
     miscellaneous.symbols=miscellaneous.symbols,
@@ -146,4 +261,15 @@ create.agg.tx.tables <- function(
     recent.transactions=recent.transactions,
     entry.price.and.quantity=entry.price.and.quantity,
     tx.nearby=tx.nearby)
+  
+  #stop()
+  
+  # Keep yesterday's cache as well. That way, we still have a valid cache if we were to rerun this
+  #  routine intraday before transactions and prices are finalized at EOD.
+  saveRDS(
+    c(
+      all.prev.agg.tx.tables,
+      list(c(agg.tx.tables, list(tx=input.tx, price.provider=price.provider$dump())))),
+    cache.path)
+  agg.tx.tables
 }
