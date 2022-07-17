@@ -2,7 +2,13 @@ lapply.and.set.names <- function(names, fn) {
   setNames(lapply(names, fn), names)
 }
 
-reduce.on.factor <- function(frame, factor.name, func) {
+reduce.on.factor <- function(frame, factor.name, func, func.on.empty=FALSE) {
+  if (func.on.empty && nrow(frame) == 0) {
+    frame.by.factor <- cbind(
+      frame[, factor.name, drop=FALSE], func(frame[, names(frame) != factor.name, drop=FALSE]))
+    return(frame.by.factor)
+  }
+  
   # This preserves order of each factor's first appearance in frame as opposed to natural ordering
   #  under split's default behavior of calling as.factor.
   factor.values <- factor(
@@ -24,6 +30,10 @@ reduce.on.factor <- function(frame, factor.name, func) {
   frame.by.factor
 }
 
+sum.or.empty <- function(x) {
+  if (length(x) == 0) x else sum(x)
+}
+
 coalesce.tx.by.date.symbol.price <- function(tx) {
   # This does not maintain the order of all transactions under a date but it does maintain the order
   #  of all transactions for a specific symbol under a date if all of those transactions were done
@@ -39,11 +49,11 @@ coalesce.tx.by.date.symbol.price <- function(tx) {
         reduce.on.factor(tx.for.ref.symbol, "Price", function(tx.for.price) {
           # Make sure we're not dropping any columns here.
           stopifnot(colnames(tx.for.price) == "Quantity")
-          data.frame(Quantity=round(sum(tx.for.price$Quantity), QTY_FRAC_DIGITS))
-        })
-      })
-    })
-  })
+          data.frame(Quantity=round(sum.or.empty(tx.for.price$Quantity), QTY_FRAC_DIGITS))
+        }, TRUE)
+      }, TRUE)
+    }, TRUE)
+  }, TRUE)
 }
 
 join.cost <- function(tx, adjust.securities.costs.by.dividends.and.fees=TRUE) {
@@ -97,6 +107,7 @@ join.cost <- function(tx, adjust.securities.costs.by.dividends.and.fees=TRUE) {
       }
       tx <- new.tx
     }
+    tx <- tx[, -which(colnames(tx) == "Row.Order")]
   } else {
     tx$Cost[tx$Reference.Symbol != ""] <- 0
   }
@@ -106,10 +117,10 @@ join.cost <- function(tx, adjust.securities.costs.by.dividends.and.fees=TRUE) {
 join.pct.drawdown <- function(tx) {
   tx$Row.Order <- seq_len(nrow(tx))
   tx <- reduce.on.factor(tx, "Symbol", function(tx.for.symbol) {
-    peak.price <- max(tx.for.symbol$Price)
+    peak.price <- max(tx.for.symbol$Price, -Inf)
     tx.for.symbol$Pct.Drawdown <- (1 - tx.for.symbol$Price / peak.price) * 100
     tx.for.symbol
-  })
+  }, TRUE)
   tx[order(tx$Row.Order), -which(colnames(tx) == "Row.Order")]
 }
 
@@ -333,14 +344,14 @@ calc.price.vs.time <- function(tx, symbol) {
 }
 
 calc.size.vs.price <- function(tx, symbol, bucket.width=1, carry.down.sales=TRUE) {
-  tx <- tx[tx$Symbol == symbol, c("Pct.Drawdown", "Cost", "Price", "Quantity")]
+  tx <- tx[tx$Symbol == symbol, c("Pct.Drawdown", "Cost", "Quantity")]
   if (bucket.width != 0)
     tx$Pct.Drawdown <- trunc(tx$Pct.Drawdown / bucket.width) * bucket.width
   costs <- reduce.on.factor(tx, "Pct.Drawdown", function(for.pct.drawdown) {
     data.frame(
-      Cost=round(sum(for.pct.drawdown$Cost), CALC_FRAC_DIGITS),
-      Quantity=round(sum(for.pct.drawdown$Quantity), QTY_FRAC_DIGITS))
-  })
+      Cost=round(sum.or.empty(for.pct.drawdown$Cost), CALC_FRAC_DIGITS),
+      Quantity=round(sum.or.empty(for.pct.drawdown$Quantity), QTY_FRAC_DIGITS))
+  }, TRUE)
   costs <- costs[order(costs$Pct.Drawdown), ]
   
   if (bucket.width != 0) {
@@ -532,20 +543,29 @@ get.recent.options <- function(tx, formatted.tx.all, misc.symbols) {
       options.roots[formatted.tx.options$Quantity == 0]
     ), function(for.root) {
       for.root <- unique(tx[tx$Symbol %in% for.root, c("Symbol", "Date")])
-      for.root <- do.call(rbind, lapply(split(for.root, for.root$Symbol), function(for.symbol) {
-        data.frame(Symbol=for.symbol$Symbol[1], Date=max(for.symbol$Date), stringsAsFactors=FALSE)
-      }))
-      recent.dates <- head(
-        sort(for.root$Date, partial=seq_len(min(8, nrow(for.root))), decreasing=TRUE), 8)
-      for.root <- for.root[for.root$Date %in% recent.dates, ]
-      for.root$Symbol[order(for.root$Date, decreasing=TRUE)]
+      for.root <- do.call(
+        rbind, unname(lapply(split(for.root, for.root$Symbol), function(for.symbol) {
+          data.frame(Symbol=for.symbol$Symbol[1], Date=max(for.symbol$Date), stringsAsFactors=FALSE)
+        })))
+      if (!is.null(for.root)) {
+        recent.dates <- head(
+          sort(for.root$Date, partial=seq_len(min(8, nrow(for.root))), decreasing=TRUE), 8)
+        for.root <- for.root[for.root$Date %in% recent.dates, ]
+        for.root <- for.root[order(for.root$Date, decreasing=TRUE), ]
+      }
+      for.root
     })
   options.roots <- unique(options.roots)
+  open.options.by.root <- lapply(open.options.by.root, function(for.root) {
+    data.frame(Symbol=for.root, Date=as.Date("9999-12-31"))
+  })
   do.call(
-    c,
-    Map(function(open.for.root, closed.for.root) {
-      c(open.for.root, head(closed.for.root, 8 - min(length(open.for.root), 8)))
-    }, open.options.by.root[options.roots], closed.options.by.root[options.roots]))
+    rbind,
+    unname(Map(function(open.for.root, closed.for.root) {
+      rbind(
+        open.for.root,
+        head(closed.for.root, 8 - min(if (is.null(open.for.root)) 0 else nrow(open.for.root), 8)))
+    }, open.options.by.root[options.roots], closed.options.by.root[options.roots])))
 }
 
 get.recent.transactions <- function(tx, symbol) {

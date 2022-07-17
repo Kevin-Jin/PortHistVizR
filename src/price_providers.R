@@ -25,12 +25,14 @@ recent.transaction.price.provider <- list(
     tx.for.date <- tx.for.date[
       tx.for.date$Reference.Symbol == "" & (tx.for.date$Quantity != 0 | tx.for.date$Price != 0), ]
     if (is.null(tx.for.date) || nrow(tx.for.date) == 0) NA else max(tx.for.date$Price)
-  })
+  },
+  dump=function() list(NULL))
 
 create.price.provider.with.overrides <- function(
     override.prices, fallback=recent.transaction.price.provider) {
   stopifnot(anyDuplicated(override.prices[, c("Date", "Symbol")]) == 0)
   
+  override.prices <- override.prices[, c("Symbol", "Date", "High", "Low", "Close")]
   # Convert the data.frame into environments to improve performance since data.frames do not support
   #  indexing.
   override.dates <- list2env(split(override.prices$Date, override.prices$Symbol))
@@ -70,5 +72,32 @@ create.price.provider.with.overrides <- function(
         NA
       else
         max(high.prices, na.rm=TRUE)
+    },
+    dump=function() rbind(override.prices, fallback$dump()))
+}
+
+filter.price.provider.dates <- function(price.provider, from.date, to.date) {
+  # There seems to be infinite recursion unless this is evaluated eagerly.
+  force(price.provider)
+  list(
+    available.dates=function(symbol) {
+      d <- price.provider$available.dates(symbol)
+      d[d >= from.date & d <= to.date]
+    },
+    price=function(symbol, date, tx.for.date) {
+      if (date >= from.date & date <= to.date) price.provider$price(symbol, date, tx.for.date)
+      else NA
+    },
+    low.price=function(symbol, date, tx.for.date) {
+      if (date >= from.date & date <= to.date) price.provider$low.price(symbol, date, tx.for.date)
+      else NA
+    },
+    high.price=function(symbol, date, tx.for.date) {
+      if (date >= from.date & date <= to.date) price.provider$high.price(symbol, date, tx.for.date)
+      else NA
+    },
+    dump=function() {
+      d <- price.provider$dump()
+      d[d$Date >= from.date & d$Date <= to.date, ]
     })
 }

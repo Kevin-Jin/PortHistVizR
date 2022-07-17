@@ -10,7 +10,7 @@ get.portfolio.summary.table <- function(agg.tx.tables) {
   misc.symbols <- agg.tx.tables$miscellaneous.symbols
   misc.symbols <- misc.symbols[!is.options.symbol(misc.symbols)]
   
-  recent.options <- agg.tx.tables$recent.options
+  recent.options <- agg.tx.tables$recent.options$Symbol
   formatted.tx.options <- formatted.tx[formatted.tx$Symbol %in% recent.options, ]
   formatted.tx.options <- formatted.tx.options[order(formatted.tx.options$Symbol), ]
   
