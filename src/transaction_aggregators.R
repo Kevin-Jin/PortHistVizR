@@ -564,7 +564,7 @@ get.recent.options <- function(tx, formatted.tx.all, misc.symbols) {
     unname(Map(function(open.for.root, closed.for.root) {
       rbind(
         open.for.root,
-        head(closed.for.root, 8 - min(if (is.null(open.for.root)) 0 else nrow(open.for.root), 8)))
+        head(closed.for.root, 8 - min(NROW(open.for.root), 8)))
     }, open.options.by.root[options.roots], closed.options.by.root[options.roots])))
 }
 
