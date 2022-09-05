@@ -278,6 +278,8 @@ find.fidelity.wash.transaction <- function(tx.part) {
   tx.part.negated$Wash.Row.Num <- 1:nrow(tx.part.negated)
   tx.part$Row.Num <- 1:nrow(tx.part)
   tx.part <- merge(tx.part[, c("Date", "Symbol", "Amount", "Row.Num")], tx.part.negated[, c("Date", "Symbol", "Amount", "Wash.Row.Num")], c("Date", "Symbol", "Amount"), all.x=TRUE)
+  # FIXME: multiple matches for a single Row.Num.
+  stopifnot(nrow(tx.part) == nrow(tx.part.negated))
   tx.part[order(tx.part$Row.Num), ]$Wash.Row.Num
 }
 

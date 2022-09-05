@@ -168,7 +168,7 @@ merge.tables <- function(
         symbols, function(symbol) {
           seed.for.symbol <- cbind.or.empty(
             tail(prev$size.vs.time.tables[[symbol]][, c("Date", "Cost")], 1),
-            Quantity=sum(prev$size.vs.time.tables[[symbol]]$Quantity),
+            Quantity=round(sum(prev$size.vs.time.tables[[symbol]]$Quantity), QTY_FRAC_DIGITS),
             Price=0,
             Reference.Symbol="")
           for.symbol <- rbind(
@@ -418,15 +418,27 @@ create.agg.tx.tables <- function(
     # TODO: make sure max(prev.tx$Date) and max(prev.price.provider$Date) are consistent.
     our.prev.price.provider <- our.prev.price.provider[
       our.prev.price.provider$Date <= max(prev.price.provider$Date), ]
-    rownames(our.prev.price.provider) <- NULL
-    rownames(prev.price.provider) <- NULL
     
-    if (
-      identical(prev.tx, our.prev.tx) && identical(prev.price.provider, our.prev.price.provider)
-    ) {
+    tx.identical <- identical(prev.tx, our.prev.tx)
+    if (tx.identical) {
+      # Don't invalidate the cache if prices are only different for symbols not in positions.
+      pos <- do.call(rbind, lapply(names(prev.agg.tx.tables$size.vs.time.tables), function(symbol) {
+        for.symbol <- prev.agg.tx.tables$size.vs.time.tables[[symbol]]
+        for.symbol$Quantity <- cumsum(for.symbol$Quantity)
+        for.symbol <- for.symbol[for.symbol$Quantity != 0, "Date", drop=FALSE]
+        cbind.or.empty(Symbol=symbol, for.symbol)
+      }))
+      prev.price.provider <- merge(prev.price.provider, pos, c("Symbol", "Date"), all=FALSE)
+      our.prev.price.provider <- merge(our.prev.price.provider, pos, c("Symbol", "Date"), all=FALSE)
+      rownames(prev.price.provider) <- NULL
+      rownames(our.prev.price.provider) <- NULL
+    }
+    if (tx.identical && identical(prev.price.provider, our.prev.price.provider)) {
+      print(paste("Choose", prev.agg.tx.tables$current.date))
       incremental.tx <- full.tx[full.tx$Date > max(prev.tx$Date), ]
       all.prev.agg.tx.tables <- tail(all.prev.agg.tx.tables, 1)
     } else {
+      print(paste("Skip", prev.agg.tx.tables$current.date))
       prev.agg.tx.tables <- NULL
       all.prev.agg.tx.tables <- head(all.prev.agg.tx.tables, -1)
     }
