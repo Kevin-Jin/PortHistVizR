@@ -282,8 +282,9 @@ find.fidelity.wash.transaction <- function(tx.part) {
 # TODO: treat any money market mutual fund (five character symbol, ends with XX) as core position?
 load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRXX")) {
   security.actions <- data.frame(
-    Action=c("YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED", "ASSIGNED", "BUY CANCEL"),
-    Sign=c(+1, +1, -1, -1, +1, -1))
+    Action=c(
+      "YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED", "EXPIRED", "ASSIGNED", "BUY CANCEL"),
+    Sign=c(+1, +1, -1, -1, +1, +1, -1))
   distribution.actions <- c("DIVIDEND RECEIVED", "LONG-TERM CAP GAIN", "SHORT-TERM CAP GAIN")
   cash.actions <- c(
     distribution.actions, "ROTH CONVERSION", "ROLLOVER", "JOURNALED JNL VS A/C TYPES",
