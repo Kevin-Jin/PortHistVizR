@@ -40,6 +40,7 @@ port.viz <- function(
     names(price.file.loaders),
     recent.transaction.price.provider)
   price.provider <- filter.price.provider.dates(price.provider, from.date, to.date)
+  tx <- adjust.quantities(tx, price.provider)
   dir.create("output", showWarnings=FALSE)
   dir.create("cache", showWarnings=FALSE)
   file.name <- if (is.null(portfolio.name)) "PortViz" else sprintf("PortViz_%s", portfolio.name)

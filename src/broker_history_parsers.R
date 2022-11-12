@@ -21,6 +21,33 @@ is.mutual.fund.symbol <- function(symbol) {
   nchar(symbol) == 5 & substr(symbol, 5, 5) == "X"
 }
 
+is.corp.action.or.fee <- function(tx, check=FALSE) {
+  # Cash transactions with a Reference.Symbol are "involuntary transactions" that are not a contra
+  #  action to a voluntary action.
+  # Non-cash transactions with a Reference.Symbol are stock dividends and (reverse) splits. These
+  #  too are corporate actions rather than voluntary investor actions and effectively they give or
+  #  take away shares at zero cost.
+
+  # Cash dividends (Symbol == $, Quantity > 0, Price == 1),
+  # cash fees (Symbol == $, Quantity < 0, Price == 1),
+  # stock dividends/splits (Symbol != $, Quantity > 0, Price == 0), and
+  # stock reverse splits (Symbol != $, Quantity < 0, Price == 0).
+  is.ca <- tx$Reference.Symbol != ""
+  stopifnot(
+    !check || all(
+      tx$Symbol[is.ca] == "$" & tx$Price[is.ca] == 1
+      | tx$Symbol[is.ca] == tx$Reference.Symbol[is.ca] & tx$Price[is.ca] == 0))
+  is.ca
+}
+
+is.cash.dividend.or.fee <- function(tx, check=FALSE) {
+  is.corp.action.or.fee(tx, check) & tx$Symbol == "$"
+}
+
+is.interest.or.fee <- function(tx, check=FALSE) {
+  is.cash.dividend.or.fee(tx, check) & tx$Reference.Symbol == "$"
+}
+
 adjust.options.prices <- function(prices.for.symbols, contract.multiplier=100) {
   # Price can only be 0 for options expiration transactions. Expiration has no commissions.
   is.opt <- is.options.symbol(prices.for.symbols$Symbol) & prices.for.symbols$Price != 0
@@ -31,6 +58,10 @@ adjust.options.prices <- function(prices.for.symbols, contract.multiplier=100) {
 }
 
 adjust.for.schwab.corporate.actions <- function(tx) {
+  # TODO: MOVE THIS LOGIC TO split.factors.from.recent.transactions AND adjust.quantities AND LEAVE
+  #  ORIGINAL QUANTITIES AND PRICES ALONE.
+  # TODO: this probably won't work correctly when we're short. We need to search for "XXXREVERSE
+  #  SPLIT EFF: " in description or detect whether Symbol is a CUSIP instead of a ticker.
   rev.split.orig.symbols <- tx[
     tx$Action == "Reverse Split" & tx$Quantity < 0, c("Date", "Quantity")]
   rev.split.new.symbols <- tx[
@@ -285,6 +316,7 @@ find.fidelity.wash.transaction <- function(tx.part) {
 
 # TODO: treat any money market mutual fund (five character symbol, ends with XX) as core position?
 load.fidelity.transactions <- function(directory, core.position=c("SPAXX", "FDRXX")) {
+  # TODO: symbol_mapping.csv for mapping CUSIP to delisted tickers and pre-split tickers.
   security.actions <- data.frame(
     Action=c(
       "YOU BOUGHT", "REINVESTMENT", "YOU SOLD", "EXPIRED", "EXPIRED", "ASSIGNED", "BUY CANCEL"),
@@ -588,6 +620,7 @@ load.alphavantage.prices <- function(directory, fallback) {
     #  transactions, see adjust.for.schwab.corporate.actions) and value (prices today). Cash
     #  dividends are accounted for as cash transactions in the portfolio, so we want to avoid double
     #  counting them.
+    # TODO: MOVE THIS LOGIC TO split.factors.from.overrides.
     corp.actions <- which(for.symbol$split_coefficient != 1)
     corp.actions <- corp.actions[corp.actions != nrow(for.symbol)]
     for (corp.action in corp.actions) {
@@ -602,7 +635,11 @@ load.alphavantage.prices <- function(directory, fallback) {
     
     if (nrow(for.symbol) > 0) {
       colname.mapping <- rbind(
-        c("timestamp", "Date"), c("high", "High"), c("low", "Low"), c("close", "Close"))
+        c("timestamp", "Date"),
+        c("high", "High"),
+        c("low", "Low"),
+        c("close", "Close"),
+        c("split_coefficient", "Split.Factor"))
       # Alpha Vantage doesn't have prices for index option underlyers, e.g. SPX, VIX, NDX, RUT.
       # The current recommended way to avoid price download attempts on every call to
       # refresh.alphavantage.prices is to create a CSV file in directory containing rows for
@@ -631,6 +668,7 @@ load.tiingo.prices <- function(directory, fallback) {
     #  transactions, see adjust.for.schwab.corporate.actions) and value (prices today). Cash
     #  dividends are accounted for as cash transactions in the portfolio, so we want to avoid double
     #  counting them.
+    # TODO: MOVE THIS LOGIC TO split.factors.from.overrides.
     corp.actions <- which(for.symbol$splitFactor != 1)
     corp.actions <- corp.actions[corp.actions != nrow(for.symbol)]
     for (corp.action in corp.actions) {
@@ -648,7 +686,11 @@ load.tiingo.prices <- function(directory, fallback) {
     
     if (nrow(for.symbol) > 0) {
       colname.mapping <- rbind(
-        c("date", "Date"), c("high", "High"), c("low", "Low"), c("close", "Close"))
+        c("date", "Date"),
+        c("high", "High"),
+        c("low", "Low"),
+        c("close", "Close"),
+        c("splitFactor", "Split.Factor"))
       # Tiingo doesn't have prices for index option underlyers, e.g. SPX, VIX, NDX, RUT.
       # The current recommended way to avoid price download attempts on every call to
       # refresh.tiingo.prices is to create a CSV file in directory containing rows for
@@ -673,6 +715,7 @@ load.simple.prices <- function(override.file, fallback) {
   names(price.overrides)[names(price.overrides) == "Price"] <- "Close"
   price.overrides$High <- price.overrides$Close
   price.overrides$Low <- price.overrides$Close
+  price.overrides$Split.Factor <- 1
   create.price.provider.with.overrides(price.overrides, fallback)
 }
 

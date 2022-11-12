@@ -58,19 +58,16 @@ coalesce.tx.by.date.symbol.price <- function(tx) {
 
 join.cost <- function(tx, adjust.securities.costs.by.dividends.and.fees=TRUE) {
   tx$Cost <- tx$Price * tx$Quantity
-  # Cash transactions with a Reference.Symbol are "involuntary transactions" that are not a contra
-  #  action to a voluntary action. The cost of acquiring cash should only increase when we deposit
-  #  money into the account or sell a security. The cost of cash positions should only decline when
-  #  we withdraw money out of the account or buy a security. Cash acquisitions from dividends are
-  #  at no cost to us. Cash losses from fees and commissions do not unintuitively decrease the cost
-  #  of acquiring cash.
+  # The cost of acquiring cash should only increase when we deposit money into the account or sell a
+  #  security. The cost of cash positions should only decline when we withdraw money out of the
+  #  account or buy a security. Cash acquisitions from dividends are at no cost to us. Cash losses
+  #  from fees and commissions should not decrease the cost of acquiring cash.
   # This smooths out the portfolio's capital gains time series since capital gains that decline due
   #  to a share price decline on the ex-dividend date should be offset by a "capital gain" in the
   #  cash balance on the dividend payment date, though there will be a dip in the portfolio's gain
   #  in between those dates. This should also make the portfolio's overall cost perfectly flat in
   #  between deposits and withdrawals so that day over day gain is exactly equal to the change in
   #  portfolio value as long as no deposits or withdrawals are made that day.
-  stopifnot(all(tx$Symbol[tx$Reference.Symbol != ""] == "$"))
   if (adjust.securities.costs.by.dividends.and.fees) {
     # Rather than keep the cost of cash positions constant on involuntary actions, lower the cost of
     #  securities positions on dividends and raise their cost on fees. This attributes the impact of
@@ -81,7 +78,7 @@ join.cost <- function(tx, adjust.securities.costs.by.dividends.and.fees=TRUE) {
     #  left equal to value, and one will be a transaction that impacts the cost of the security but
     #  not its value.
     tx$Row.Order <- seq_len(nrow(tx))
-    involuntaries <- tx[tx$Reference.Symbol != "", ]
+    involuntaries <- tx[is.cash.dividend.or.fee(tx, TRUE), ]
     if (nrow(involuntaries) != 0) {
       last.involuntary.row <- 0
       new.tx <- NULL
@@ -109,7 +106,15 @@ join.cost <- function(tx, adjust.securities.costs.by.dividends.and.fees=TRUE) {
     }
     tx <- tx[, -which(colnames(tx) == "Row.Order")]
   } else {
-    tx$Cost[tx$Reference.Symbol != ""] <- 0
+    tx$Cost[is.cash.dividend.or.fee(tx, TRUE)] <- 0
+  }
+  tx
+}
+
+adjust.quantities <- function(tx, price.provider) {
+  for (symbol in unique(tx$Symbol)) {
+    # TODO: implement
+    price.provider$split.factors(symbol, tx[tx$Symbol == symbol, ])
   }
   tx
 }
@@ -198,7 +203,7 @@ calc.portfolio.size.snapshot <- function(
   row.names(agg.by.symbol) <- c()
   
   agg.by.ref.sym <- reduce.on.factor(
-    tx[tx$Reference.Symbol != "", ], "Reference.Symbol", function(tx.for.ref.sym) {
+    tx[is.cash.dividend.or.fee(tx), ], "Reference.Symbol", function(tx.for.ref.sym) {
       data.frame(
         Dividends=sum(
           (tx.for.ref.sym$Quantity * tx.for.ref.sym$Price)[tx.for.ref.sym$Quantity > 0]),
@@ -388,9 +393,9 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
     date <- unique(for.date$Date.Copy)
     data.frame(
       Cost=sum(for.date$Cost),
-      Average.Price=price.provider$price(symbol, date, for.date),
-      Low.Price=price.provider$low.price(symbol, date, for.date),
-      High.Price=price.provider$high.price(symbol, date, for.date),
+      Average.Price=price.provider$price(symbol, date, for.date, tx),
+      Low.Price=price.provider$low.price(symbol, date, for.date, tx),
+      High.Price=price.provider$high.price(symbol, date, for.date, tx),
       Quantity=round(sum(for.date$Quantity), QTY_FRAC_DIGITS))
   })
   available.price.dates <- price.provider$available.dates(symbol)
@@ -401,11 +406,11 @@ calc.size.vs.time <- function(tx, symbol, price.provider=recent.transaction.pric
       Date=available.price.dates,
       Cost=0,
       Average.Price=unlist(lapply(
-        available.price.dates, function(date) price.provider$price(symbol, date, NULL))),
+        available.price.dates, function(date) price.provider$price(symbol, date, NULL, tx))),
       Low.Price=unlist(lapply(
-        available.price.dates, function(date) price.provider$low.price(symbol, date, NULL))),
+        available.price.dates, function(date) price.provider$low.price(symbol, date, NULL, tx))),
       High.Price=unlist(lapply(
-        available.price.dates, function(date) price.provider$high.price(symbol, date, NULL))),
+        available.price.dates, function(date) price.provider$high.price(symbol, date, NULL, tx))),
       Quantity=0))
   }
   costs <- costs[order(costs$Date), ]
@@ -512,8 +517,9 @@ get.size.vs.time.tables.with.opt.roots <- function(
     lapply.and.set.names(
       options.roots.only,
       function(symbol) {
-        # Create a stub transaction table that will still allow calc.size.vs.time to go to other
-        #  price providers beside recent.transaction.price.provider.
+        # Create a table with a stub transaction that appears to be a corporate action so that
+        #  calc.size.vs.time will load prices from all price providers other than
+        #  recent.transaction.price.provider.
         stub.tx <- data.frame(
           Date=c(as.Date("0001-01-01"), current.date),
           Symbol=symbol,
@@ -570,15 +576,15 @@ get.recent.options <- function(tx, formatted.tx.all, misc.symbols) {
 
 get.recent.transactions <- function(tx, symbol) {
   # Include dividend and interest transactions, but not fees, cash contra transactions, deposits,
-  #  and withdrawals.
+  #  withdrawals, stock dividends, stock splits, and reverse stock splits.
   # TODO: support deposits and withdrawals. Either add a new column to the transaction table for
   #  identifying cash contra transactions, or group transactions by date and subtract non-cash
   #  costs with no reference symbol from cash costs with no reference symbol to get day's net
   #  inflow.
   for.symbol <- tx[
     tx$Symbol == symbol & (
-      if (symbol == "$") (tx$Reference.Symbol == "$" & tx$Cost < 0)
-      else (tx$Reference.Symbol == "" | tx$Cost < 0)
+      if (symbol == "$") (is.interest.or.fee(tx) & tx$Cost < 0)
+      else (!is.corp.action.or.fee(tx) | tx$Cost < 0)
     ),
     c("Date", "Price", "Quantity", "Cost")]
   recent.dates <- head(
